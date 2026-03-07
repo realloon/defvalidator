@@ -35,7 +35,9 @@ public static class DefValidationEngine {
             return Task.FromResult(Finish(diagnostics.ToResult()));
         }
 
-        var catalog = MeasureValue("load_metadata", () => AssemblyCatalog.Load(context, diagnostics));
+        var metadataProfiler = new StepProfiler();
+        var catalog = MeasureValue("load_metadata", () => AssemblyCatalog.Load(context, diagnostics, metadataProfiler));
+        timings.AddRange(metadataProfiler.Export("load_metadata"));
         var xmlProfiler = new StepProfiler();
         var aggregate = MeasureValue("build_xml", () => XmlPipeline.BuildAggregate(context, diagnostics, xmlProfiler));
         timings.AddRange(xmlProfiler.Export("build_xml"));

@@ -12,42 +12,64 @@ internal sealed class AssemblyCatalog {
     private AssemblyCatalog() {
     }
 
-    public static AssemblyCatalog Load(ModContext context, DiagnosticBag diagnostics) {
-        var gameAssemblyPaths = EnumerateGameManagedAssemblies(context.GameDirectory)
+    public static AssemblyCatalog Load(ModContext context, DiagnosticBag diagnostics, StepProfiler? profiler = null) {
+        var gameAssemblyPaths = MeasureValue("enumerate_game_assemblies", () => EnumerateGameManagedAssemblies(context.GameDirectory)
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        var coreMetadataAssemblyPaths = gameAssemblyPaths
+            .ToList());
+        var coreMetadataAssemblyPaths = MeasureValue("filter_core_assemblies", () => gameAssemblyPaths
             .Where(static path => IsRelevantCoreMetadataAssembly(Path.GetFileName(path)))
-            .ToList();
+            .ToList());
         if (coreMetadataAssemblyPaths.Count == 0) {
             coreMetadataAssemblyPaths = gameAssemblyPaths;
         }
-        var modAssemblyPaths = context.ModsInLoadOrder
+
+        var modAssemblyPaths = MeasureValue("enumerate_mod_assemblies", () => context.ModsInLoadOrder
             .SelectMany(static mod => mod.AssemblyPaths)
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+            .ToList());
 
-        var runtimeAssemblies = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))?
+        var runtimeAssemblies = MeasureValue("enumerate_runtime_assemblies", () => ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))?
                                 .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
                                 .GroupBy(static path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)
                                 .Select(static group => group.First())
                                 .ToList()
-                                ?? [];
+                                ?? []);
 
-        var resolverAssemblies = gameAssemblyPaths
+        var resolverAssemblies = MeasureValue("build_resolver_assemblies", () => gameAssemblyPaths
             .Concat(modAssemblyPaths)
             .Concat(runtimeAssemblies)
             .GroupBy(static path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)
             .Select(static group => group.First())
-            .ToList();
+            .ToList());
+
+        var coreTypes = MeasureValue("load_core_types", () => LoadCoreTypes(coreMetadataAssemblyPaths, resolverAssemblies, diagnostics, profiler));
+        var modTypes = MeasureValue("load_mod_types", () => LoadAssemblyTypes(modAssemblyPaths, resolverAssemblies, diagnostics, profiler));
 
         var catalog = new AssemblyCatalog();
-        foreach (var type in LoadCoreTypes(coreMetadataAssemblyPaths, resolverAssemblies, diagnostics)
-                     .Concat(LoadAssemblyTypes(modAssemblyPaths, resolverAssemblies, diagnostics))) {
-            catalog.Register(type);
-        }
+        Measure("register_types", () => {
+            foreach (var type in coreTypes.Concat(modTypes)) {
+                catalog.Register(type);
+            }
+        });
 
         return catalog;
+
+        T MeasureValue<T>(string name, Func<T> action) {
+            if (profiler is null) {
+                return action();
+            }
+
+            return profiler.MeasureValue(name, action);
+        }
+
+        void Measure(string name, Action action) {
+            if (profiler is null) {
+                action();
+                return;
+            }
+
+            profiler.Measure(name, action);
+        }
     }
 
     public CatalogType? FindType(string? typeName) {
@@ -220,41 +242,73 @@ internal sealed class AssemblyCatalog {
     private static IReadOnlyList<CatalogType> LoadCoreTypes(
         IReadOnlyList<string> gameAssemblyPaths,
         IReadOnlyList<string> resolverAssemblies,
-        DiagnosticBag diagnostics) {
+        DiagnosticBag diagnostics,
+        StepProfiler? profiler = null) {
         var cachePath = GetCoreCachePath(gameAssemblyPaths);
-        if (TryReadCache(cachePath, out var cachedTypes)) {
+        IReadOnlyList<CatalogType> cachedTypes = [];
+        if (MeasureValue("read_core_types_cache", () => TryReadCache(cachePath, out cachedTypes))) {
             return cachedTypes;
         }
 
-        var loadedTypes = LoadAssemblyTypes(gameAssemblyPaths, resolverAssemblies, diagnostics);
-        TryWriteCache(cachePath, loadedTypes);
+        var loadedTypes = MeasureValue("load_core_types_from_assemblies", () => LoadAssemblyTypes(gameAssemblyPaths, resolverAssemblies, diagnostics, profiler));
+        Measure("write_core_types_cache", () => TryWriteCache(cachePath, loadedTypes));
         return loadedTypes;
+
+        T MeasureValue<T>(string name, Func<T> action) {
+            if (profiler is null) {
+                return action();
+            }
+
+            return profiler.MeasureValue(name, action);
+        }
+
+        void Measure(string name, Action action) {
+            if (profiler is null) {
+                action();
+                return;
+            }
+
+            profiler.Measure(name, action);
+        }
     }
 
     private static List<CatalogType> LoadAssemblyTypes(
         IReadOnlyList<string> targetAssemblyPaths,
         IReadOnlyList<string> resolverAssemblies,
-        DiagnosticBag diagnostics) {
+        DiagnosticBag diagnostics,
+        StepProfiler? profiler = null) {
         if (targetAssemblyPaths.Count == 0) {
             return [];
         }
 
-        var loadContext = new MetadataLoadContext(new PathAssemblyResolver(resolverAssemblies),
-            ResolveCoreAssemblyName(resolverAssemblies));
-        var assemblies = new List<Assembly>();
-        foreach (var path in targetAssemblyPaths) {
-            try {
-                assemblies.Add(loadContext.LoadFromAssemblyPath(Path.GetFullPath(path)));
-            } catch (Exception ex) {
-                diagnostics.Add("CTX008", DiagnosticSeverity.Warning,
-                    $"Failed to load assembly metadata from {path}: {ex.Message}", ValidationStage.Context, file: path);
+        var loadContext = MeasureValue("create_metadata_load_context", () => new MetadataLoadContext(new PathAssemblyResolver(resolverAssemblies),
+            ResolveCoreAssemblyName(resolverAssemblies)));
+        var assemblies = MeasureValue("load_assemblies", () => {
+            var loaded = new List<Assembly>();
+            foreach (var path in targetAssemblyPaths) {
+                try {
+                    loaded.Add(loadContext.LoadFromAssemblyPath(Path.GetFullPath(path)));
+                } catch (Exception ex) {
+                    diagnostics.Add("CTX008", DiagnosticSeverity.Warning,
+                        $"Failed to load assembly metadata from {path}: {ex.Message}", ValidationStage.Context, file: path);
+                }
             }
-        }
 
-        return assemblies
+            return loaded;
+        });
+
+        return MeasureValue("materialize_catalog_types", () => assemblies
             .SelectMany(SafeGetTypes)
             .Select(CreateType)
-            .ToList();
+            .ToList());
+
+        T MeasureValue<T>(string name, Func<T> action) {
+            if (profiler is null) {
+                return action();
+            }
+
+            return profiler.MeasureValue(name, action);
+        }
     }
 
     private static CatalogType CreateType(Type type) {
