@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="src/DefValidator.Core/DefValidator.Core.csproj" />
+  <Project Path="src/DefValidator.Cli/DefValidator.Cli.csproj" />
+  <Project Path="tests/FixtureVerse/FixtureVerse.csproj" />
+  <Project Path="tests/FixtureModTypes/FixtureModTypes.csproj" />
+  <Project Path="tests/DefValidator.Tests/DefValidator.Tests.csproj" />
+</Solution>
