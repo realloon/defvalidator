@@ -60,15 +60,15 @@ internal sealed record CliParseResult(bool Success, string? ErrorMessage, Valida
 internal static class CliParser {
     public static CliParseResult TryParse(IReadOnlyList<string> args) {
         try {
-            if (args.Count == 0) {
+            var modPath = args.Count == 0 ? ResolveDefaultModPath() : args[0];
+            if (string.IsNullOrWhiteSpace(modPath)) {
                 return Fail(
-                    "Usage: defvalidator <mod-path> [--game-dir <path>]\nIf --game-dir is omitted, defvalidator tries the default Steam install path for the current user.");
+                    "Usage: defvalidator <mod-path> [--game-dir <path>]\nIf no <mod-path> is passed, defvalidator uses the current directory when it looks like a RimWorld mod root (contains About/About.xml).\nIf --game-dir is omitted, defvalidator tries the default Steam install path for the current user.");
             }
 
-            var modPath = args[0];
             string? gameDir = null;
 
-            for (var index = 1; index < args.Count; index++) {
+            for (var index = args.Count == 0 ? 0 : 1; index < args.Count; index++) {
                 var arg = args[index];
                 switch (arg) {
                     case "--game-dir":
@@ -91,6 +91,12 @@ internal static class CliParser {
         } catch (Exception ex) {
             return Fail(ex.Message);
         }
+    }
+
+    private static string? ResolveDefaultModPath() {
+        var currentDirectory = Directory.GetCurrentDirectory();
+        var aboutPath = Path.Combine(currentDirectory, "About", "About.xml");
+        return File.Exists(aboutPath) ? currentDirectory : null;
     }
 
     private static string NextValue(IReadOnlyList<string> args, ref int index, string option) {

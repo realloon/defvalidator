@@ -9,6 +9,7 @@ await runner.RunAsync();
 internal sealed class TestRunner {
     private readonly List<(string Name, Func<Task> Test)> _tests = [
         (nameof(MissingArgs_Returns2), MissingArgs_Returns2),
+        (nameof(MissingArgs_UsesCurrentDirectoryWhenItLooksLikeAMod), MissingArgs_UsesCurrentDirectoryWhenItLooksLikeAMod),
         (nameof(UnknownArgument_Returns2), UnknownArgument_Returns2),
         (nameof(AutoDetectedGameDir_ValidatesModPath), AutoDetectedGameDir_ValidatesModPath),
         (nameof(ModsConfig_IsNotSupported_Returns2), ModsConfig_IsNotSupported_Returns2),
@@ -39,6 +40,30 @@ internal sealed class TestRunner {
         var result = await RunCliAsync([]);
         Assert.Equal(2, result.ExitCode);
         Assert.Contains(result.StdErr, "Usage: defvalidator <mod-path> [--game-dir <path>]");
+    }
+
+    private static async Task MissingArgs_UsesCurrentDirectoryWhenItLooksLikeAMod() {
+        var repoRoot = FindRepoRoot();
+        var workRoot = Path.Combine(repoRoot, ".tmp", "cli-current-dir-mod");
+        Directory.CreateDirectory(Path.Combine(workRoot, "About"));
+        await File.WriteAllTextAsync(Path.Combine(workRoot, "About", "About.xml"), """
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+  <packageId>test.currentdir</packageId>
+  <name>Current Dir Mod</name>
+  <supportedVersions><li>1.6</li></supportedVersions>
+</ModMetaData>
+""");
+
+        try {
+            var result = await RunCliAsync([], workingDirectory: workRoot);
+            Assert.NotEqual(2, result.ExitCode);
+            Assert.DoesNotContain(result.StdErr, "Usage: defvalidator <mod-path> [--game-dir <path>]");
+        } finally {
+            if (Directory.Exists(workRoot)) {
+                Directory.Delete(workRoot, recursive: true);
+            }
+        }
     }
 
     private static async Task UnknownArgument_Returns2() {
@@ -163,13 +188,14 @@ internal sealed class TestRunner {
         return method.Invoke(node, []);
     }
 
-    private static async Task<CliResult> RunCliAsync(string[] args, IReadOnlyDictionary<string, string?>? environment = null) {
+    private static async Task<CliResult> RunCliAsync(string[] args, IReadOnlyDictionary<string, string?>? environment = null,
+        string? workingDirectory = null) {
         var repoRoot = FindRepoRoot();
         var cliDll = FindCliDll(repoRoot);
         var startInfo = new ProcessStartInfo("dotnet") {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            WorkingDirectory = repoRoot
+            WorkingDirectory = workingDirectory ?? repoRoot
         };
 
         if (environment is not null) {
@@ -237,6 +263,18 @@ internal static class Assert {
     public static void NotNull(object? value) {
         if (value is null) {
             throw new InvalidOperationException("Expected non-null value.");
+        }
+    }
+
+    public static void NotEqual<T>(T notExpected, T actual) {
+        if (EqualityComparer<T>.Default.Equals(notExpected, actual)) {
+            throw new InvalidOperationException($"Did not expect '{actual}'.");
+        }
+    }
+
+    public static void DoesNotContain(string value, string unexpectedSubstring) {
+        if (value.Contains(unexpectedSubstring, StringComparison.Ordinal)) {
+            throw new InvalidOperationException($"Did not expect substring '{unexpectedSubstring}' in: {value}");
         }
     }
 }
