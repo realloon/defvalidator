@@ -11,8 +11,7 @@ obj/
 riderModule.iml
 /_ReSharper.Caches/
 
-refs/
-.env
+.tmp
 
 AGENTS.md
 
