@@ -8,18 +8,16 @@ internal sealed class AssemblyCatalog
     private readonly Dictionary<string, Type> _typesByName = new(StringComparer.Ordinal);
     private readonly Dictionary<Type, IReadOnlyDictionary<string, MemberInfo>> _memberCache = new();
 
-    private AssemblyCatalog(Type? defBaseType, Type? compPropertiesBaseType, Type? patchOperationBaseType)
+    private AssemblyCatalog(Type? defBaseType, Type? compPropertiesBaseType)
     {
         DefBaseType = defBaseType;
         CompPropertiesBaseType = compPropertiesBaseType;
-        PatchOperationBaseType = patchOperationBaseType;
     }
 
     public Type? DefBaseType { get; }
 
     public Type? CompPropertiesBaseType { get; }
 
-    public Type? PatchOperationBaseType { get; }
 
     public static AssemblyCatalog Load(ModContext context, DiagnosticBag diagnostics)
     {
@@ -57,8 +55,7 @@ internal sealed class AssemblyCatalog
 
         var catalog = new AssemblyCatalog(
             assemblies.SelectMany(SafeGetTypes).FirstOrDefault(static type => type.FullName == "Verse.Def"),
-            assemblies.SelectMany(SafeGetTypes).FirstOrDefault(static type => type.FullName == "Verse.CompProperties"),
-            assemblies.SelectMany(SafeGetTypes).FirstOrDefault(static type => type.FullName == "Verse.PatchOperation"));
+            assemblies.SelectMany(SafeGetTypes).FirstOrDefault(static type => type.FullName == "Verse.CompProperties"));
 
         foreach (var assembly in assemblies)
         {
@@ -90,7 +87,6 @@ internal sealed class AssemblyCatalog
 
     public bool IsCompPropertiesType(Type? type) => type is not null && CompPropertiesBaseType is not null && IsAssignableTo(type, CompPropertiesBaseType);
 
-    public bool IsPatchOperationType(Type? type) => type is not null && PatchOperationBaseType is not null && IsAssignableTo(type, PatchOperationBaseType);
 
     public IReadOnlyDictionary<string, MemberInfo> GetMembers(Type type)
     {

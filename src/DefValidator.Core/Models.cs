@@ -1,5 +1,3 @@
-using System.Text.Json.Serialization;
-
 namespace DefValidator.Core;
 
 public enum DiagnosticSeverity
@@ -14,7 +12,6 @@ public enum ValidationStage
     Cli,
     Context,
     XmlLoad,
-    Patch,
     Inheritance,
     Type,
     Xref,
@@ -25,9 +22,7 @@ public sealed record ValidationOptions(
     string ModPath,
     string GameDirectory,
     string ModsConfigPath,
-    IReadOnlyList<string> EnabledPackageIds,
-    bool Strict,
-    bool ApplyPatches = true);
+    bool Strict);
 
 public sealed record Diagnostic(
     string Code,
@@ -94,10 +89,4 @@ internal sealed class DiagnosticBag
 
         return new ValidationResult(summary, _items);
     }
-}
-
-[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase, WriteIndented = true)]
-[JsonSerializable(typeof(ValidationResult))]
-public partial class ValidationResultJsonContext : JsonSerializerContext
-{
 }

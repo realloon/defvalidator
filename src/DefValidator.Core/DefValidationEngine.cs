@@ -19,7 +19,7 @@ public sealed class DefValidationEngine
         }
 
         var catalog = AssemblyCatalog.Load(context, diagnostics);
-        var aggregate = XmlPipeline.BuildAggregate(context, options.ApplyPatches, diagnostics);
+        var aggregate = XmlPipeline.BuildAggregate(context, diagnostics);
         if (aggregate is null)
         {
             return Task.FromResult(diagnostics.ToResult());
@@ -33,10 +33,9 @@ public sealed class DefValidationEngine
 
 internal static class XmlPipeline
 {
-    public static XDocument? BuildAggregate(ModContext context, bool applyPatches, DiagnosticBag diagnostics)
+    public static XDocument? BuildAggregate(ModContext context, DiagnosticBag diagnostics)
     {
         var defDocuments = new List<(ModInfo Mod, string FilePath, XDocument Document)>();
-        var patchDocuments = new List<(ModInfo Mod, string FilePath, XDocument Document)>();
 
         foreach (var mod in context.ModsInLoadOrder)
         {
@@ -44,7 +43,6 @@ internal static class XmlPipeline
             {
                 var root = Path.GetFullPath(Path.Combine(mod.RootPath, folder));
                 CollectXmlDocuments(mod, root, "Defs", defDocuments, diagnostics, context.ActivePackageIds);
-                CollectXmlDocuments(mod, root, "Patches", patchDocuments, diagnostics, context.ActivePackageIds);
             }
         }
 
@@ -59,22 +57,6 @@ internal static class XmlPipeline
             foreach (var child in document.Root.Elements())
             {
                 aggregate.Root!.Add(CloneElement(child));
-            }
-        }
-
-        if (applyPatches)
-        {
-            foreach (var (mod, filePath, document) in patchDocuments)
-            {
-                if (document.Root is null)
-                {
-                    continue;
-                }
-
-                foreach (var operation in document.Root.Elements().Where(static element => element.Name.LocalName is "Operation" or "li"))
-                {
-                    PatchEngine.ApplyOperation(aggregate, operation, mod, context.ActivePackageIds, diagnostics, filePath);
-                }
             }
         }
 
@@ -186,281 +168,6 @@ internal static class XmlPipeline
         XComment comment => new XComment(comment.Value),
         _ => null
     };
-}
-
-internal static class PatchEngine
-{
-    public static bool ApplyOperation(XDocument aggregate, XElement operationElement, ModInfo mod, IReadOnlySet<string> activePackageIds, DiagnosticBag diagnostics, string filePath)
-    {
-        var className = operationElement.Attribute("Class")?.Value?.Trim();
-        var source = operationElement.Annotation<SourceInfo>();
-        var simpleName = className?.Split('.').LastOrDefault();
-        if (string.IsNullOrWhiteSpace(simpleName))
-        {
-            diagnostics.Add("PATCH001", DiagnosticSeverity.Error, "Patch operation is missing Class.", ValidationStage.Patch, filePath, source?.Line, source?.Column, mod.PackageId);
-            return false;
-        }
-
-        bool success = simpleName switch
-        {
-            "PatchOperationAdd" => ApplyAddLike(aggregate, operationElement, prepend: ReadOrder(operationElement) == "Prepend"),
-            "PatchOperationReplace" => ApplyReplace(aggregate, operationElement),
-            "PatchOperationRemove" => ApplyRemove(aggregate, operationElement),
-            "PatchOperationInsert" => ApplyInsert(aggregate, operationElement, prepend: ReadOrder(operationElement) != "Append"),
-            "PatchOperationSequence" => ApplySequence(aggregate, operationElement, mod, activePackageIds, diagnostics, filePath),
-            "PatchOperationConditional" => ApplyConditional(aggregate, operationElement, mod, activePackageIds, diagnostics, filePath),
-            "PatchOperationFindMod" => ApplyFindMod(aggregate, operationElement, mod, activePackageIds, diagnostics, filePath),
-            "PatchOperationSetName" => ApplySetName(aggregate, operationElement),
-            "PatchOperationAttributeAdd" => ApplyAttribute(aggregate, operationElement, AttributeMode.Add),
-            "PatchOperationAttributeRemove" => ApplyAttribute(aggregate, operationElement, AttributeMode.Remove),
-            "PatchOperationAttributeSet" => ApplyAttribute(aggregate, operationElement, AttributeMode.Set),
-            "PatchOperationAddModExtension" => ApplyAddModExtension(aggregate, operationElement),
-            _ => Unsupported(simpleName, diagnostics, source, mod.PackageId, filePath)
-        };
-
-        if (!success)
-        {
-            diagnostics.Add("PATCH002", DiagnosticSeverity.Warning, $"Patch operation {simpleName} did not match any nodes.", ValidationStage.Patch, filePath, source?.Line, source?.Column, mod.PackageId);
-        }
-
-        return success;
-    }
-
-    private static bool Unsupported(string simpleName, DiagnosticBag diagnostics, SourceInfo? source, string packageId, string filePath)
-    {
-        diagnostics.Add("PATCH001", DiagnosticSeverity.Warning, $"Unsupported patch operation: {simpleName}", ValidationStage.Patch, filePath, source?.Line, source?.Column, packageId);
-        return false;
-    }
-
-    private static bool ApplyAddLike(XDocument aggregate, XElement operationElement, bool prepend)
-    {
-        var targets = SelectTargets(aggregate, operationElement).ToList();
-        var value = operationElement.Element("value");
-        if (targets.Count == 0 || value is null)
-        {
-            return false;
-        }
-
-        foreach (var target in targets)
-        {
-            var children = value.Elements().Select(XmlPipeline.CloneElement).ToList();
-            if (prepend)
-            {
-                target.AddFirst(children.Reverse<XElement>());
-            }
-            else
-            {
-                target.Add(children);
-            }
-        }
-
-        return true;
-    }
-
-    private static bool ApplyInsert(XDocument aggregate, XElement operationElement, bool prepend)
-    {
-        var targets = SelectTargets(aggregate, operationElement).ToList();
-        var value = operationElement.Element("value");
-        if (targets.Count == 0 || value is null)
-        {
-            return false;
-        }
-
-        foreach (var target in targets)
-        {
-            var parent = target.Parent;
-            if (parent is null)
-            {
-                continue;
-            }
-
-            var items = value.Elements().Select(XmlPipeline.CloneElement).ToList();
-            if (prepend)
-            {
-                foreach (var item in items.Reverse<XElement>())
-                {
-                    target.AddBeforeSelf(item);
-                }
-            }
-            else
-            {
-                foreach (var item in items)
-                {
-                    target.AddAfterSelf(item);
-                }
-            }
-        }
-
-        return true;
-    }
-
-    private static bool ApplyReplace(XDocument aggregate, XElement operationElement)
-    {
-        var targets = SelectTargets(aggregate, operationElement).ToList();
-        var value = operationElement.Element("value");
-        if (targets.Count == 0 || value is null)
-        {
-            return false;
-        }
-
-        foreach (var target in targets)
-        {
-            var replacements = value.Elements().Select(XmlPipeline.CloneElement).ToList();
-            target.ReplaceWith(replacements);
-        }
-
-        return true;
-    }
-
-    private static bool ApplyRemove(XDocument aggregate, XElement operationElement)
-    {
-        var targets = SelectTargets(aggregate, operationElement).ToList();
-        if (targets.Count == 0)
-        {
-            return false;
-        }
-
-        targets.Remove();
-        return true;
-    }
-
-    private static bool ApplySequence(XDocument aggregate, XElement operationElement, ModInfo mod, IReadOnlySet<string> activePackageIds, DiagnosticBag diagnostics, string filePath)
-    {
-        var operations = operationElement.Element("operations")?.Elements().ToList() ?? [];
-        if (operations.Count == 0)
-        {
-            return false;
-        }
-
-        foreach (var operation in operations)
-        {
-            if (!ApplyOperation(aggregate, operation, mod, activePackageIds, diagnostics, filePath))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static bool ApplyConditional(XDocument aggregate, XElement operationElement, ModInfo mod, IReadOnlySet<string> activePackageIds, DiagnosticBag diagnostics, string filePath)
-    {
-        var hasMatch = SelectTargets(aggregate, operationElement).Any();
-        var branch = hasMatch ? operationElement.Element("match") : operationElement.Element("nomatch");
-        var nested = branch?.Elements().FirstOrDefault();
-        return nested is null || ApplyOperation(aggregate, nested, mod, activePackageIds, diagnostics, filePath);
-    }
-
-    private static bool ApplyFindMod(XDocument aggregate, XElement operationElement, ModInfo mod, IReadOnlySet<string> activePackageIds, DiagnosticBag diagnostics, string filePath)
-    {
-        var hasMatch = operationElement.Element("mods")?.Elements().Any(li => activePackageIds.Contains(li.Value.Trim())) == true;
-        var branch = hasMatch ? operationElement.Element("match") : operationElement.Element("nomatch");
-        var nested = branch?.Elements().FirstOrDefault();
-        return nested is null || ApplyOperation(aggregate, nested, mod, activePackageIds, diagnostics, filePath);
-    }
-
-    private static bool ApplySetName(XDocument aggregate, XElement operationElement)
-    {
-        var name = operationElement.Element("name")?.Value.Trim();
-        var targets = SelectTargets(aggregate, operationElement).ToList();
-        if (targets.Count == 0 || string.IsNullOrWhiteSpace(name))
-        {
-            return false;
-        }
-
-        foreach (var target in targets)
-        {
-            target.Name = name;
-        }
-
-        return true;
-    }
-
-    private static bool ApplyAddModExtension(XDocument aggregate, XElement operationElement)
-    {
-        var targets = SelectTargets(aggregate, operationElement).ToList();
-        var value = operationElement.Element("value");
-        if (targets.Count == 0 || value is null)
-        {
-            return false;
-        }
-
-        foreach (var target in targets)
-        {
-            var extensionContainer = target.Element("modExtensions");
-            if (extensionContainer is null)
-            {
-                extensionContainer = new XElement("modExtensions");
-                if (target.Annotation<SourceInfo>() is { } source)
-                {
-                    extensionContainer.AddAnnotation(source);
-                }
-
-                target.Add(extensionContainer);
-            }
-
-            extensionContainer.Add(value.Elements().Select(XmlPipeline.CloneElement));
-        }
-
-        return true;
-    }
-
-    private static bool ApplyAttribute(XDocument aggregate, XElement operationElement, AttributeMode mode)
-    {
-        var attribute = operationElement.Element("attribute")?.Value.Trim();
-        var value = operationElement.Element("value")?.Value ?? string.Empty;
-        var targets = SelectTargets(aggregate, operationElement).ToList();
-        if (targets.Count == 0 || string.IsNullOrWhiteSpace(attribute))
-        {
-            return false;
-        }
-
-        foreach (var target in targets)
-        {
-            var existing = target.Attribute(attribute);
-            switch (mode)
-            {
-                case AttributeMode.Add when existing is null:
-                    target.SetAttributeValue(attribute, value);
-                    break;
-                case AttributeMode.Remove when existing is not null:
-                    existing.Remove();
-                    break;
-                case AttributeMode.Set:
-                    target.SetAttributeValue(attribute, value);
-                    break;
-            }
-        }
-
-        return true;
-    }
-
-    private static IEnumerable<XElement> SelectTargets(XDocument aggregate, XElement operationElement)
-    {
-        var xpath = operationElement.Element("xpath")?.Value.Trim();
-        if (string.IsNullOrWhiteSpace(xpath))
-        {
-            return [];
-        }
-
-        try
-        {
-            return aggregate.XPathSelectElements(xpath).ToList();
-        }
-        catch
-        {
-            return [];
-        }
-    }
-
-    private static string ReadOrder(XElement operationElement) => operationElement.Element("order")?.Value.Trim() ?? "Append";
-
-    private enum AttributeMode
-    {
-        Add,
-        Remove,
-        Set
-    }
 }
 
 internal static class InheritanceResolver

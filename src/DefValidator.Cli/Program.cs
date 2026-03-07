@@ -1,4 +1,3 @@
-using System.Text.Json;
 using DefValidator.Core;
 
 return await CliProgram.RunAsync(args);
@@ -16,17 +15,9 @@ internal static class CliProgram
 
         var engine = new DefValidationEngine();
         var result = await engine.ValidateAsync(parseResult.Options!, CancellationToken.None);
-
-        if (parseResult.Format == OutputFormat.Json)
+        foreach (var diagnostic in result.Diagnostics)
         {
-            Console.WriteLine(JsonSerializer.Serialize(result, ValidationResultJsonContext.Default.ValidationResult));
-        }
-        else
-        {
-            foreach (var diagnostic in result.Diagnostics)
-            {
-                Console.WriteLine(FormatText(diagnostic));
-            }
+            Console.WriteLine(FormatText(diagnostic));
         }
 
         return result.GetExitCode(parseResult.Options!.Strict);
@@ -50,13 +41,7 @@ internal static class CliProgram
     }
 }
 
-internal enum OutputFormat
-{
-    Text,
-    Json
-}
-
-internal sealed record CliParseResult(bool Success, string? ErrorMessage, ValidationOptions? Options, OutputFormat Format);
+internal sealed record CliParseResult(bool Success, string? ErrorMessage, ValidationOptions? Options);
 
 internal static class CliParser
 {
@@ -64,25 +49,17 @@ internal static class CliParser
     {
         try
         {
-            if (args.Count == 0 || !string.Equals(args[0], "validate", StringComparison.OrdinalIgnoreCase))
+            if (args.Count == 0)
             {
-                return Fail("Usage: defvalidator validate <mod-path> --game-dir <path> --mods-config <path> [--format text|json] [--strict] [--enabled-package-id <id> ...] [--no-patches]");
+                return Fail("Usage: defvalidator <mod-path> [--game-dir <path>] [--mods-config <path>] [--strict]\nMissing --game-dir/--mods-config can be filled from .env via DEFVALIDATOR_GAME_DIR and DEFVALIDATOR_MODS_CONFIG.");
             }
 
-            if (args.Count < 2)
-            {
-                return Fail("Missing <mod-path>.");
-            }
-
-            var modPath = args[1];
+            var modPath = args[0];
             string? gameDir = null;
             string? modsConfig = null;
-            var enabledPackageIds = new List<string>();
             var strict = false;
-            var applyPatches = true;
-            var format = OutputFormat.Text;
 
-            for (var index = 2; index < args.Count; index++)
+            for (var index = 1; index < args.Count; index++)
             {
                 var arg = args[index];
                 switch (arg)
@@ -93,44 +70,32 @@ internal static class CliParser
                     case "--mods-config":
                         modsConfig = NextValue(args, ref index, arg);
                         break;
-                    case "--enabled-package-id":
-                        enabledPackageIds.Add(NextValue(args, ref index, arg));
-                        break;
-                    case "--format":
-                        var value = NextValue(args, ref index, arg);
-                        format = value.ToLowerInvariant() switch
-                        {
-                            "text" => OutputFormat.Text,
-                            "json" => OutputFormat.Json,
-                            _ => throw new InvalidOperationException($"Unsupported --format value: {value}")
-                        };
-                        break;
                     case "--strict":
                         strict = true;
-                        break;
-                    case "--no-patches":
-                        applyPatches = false;
                         break;
                     default:
                         return Fail($"Unknown argument: {arg}");
                 }
             }
 
+            var dotEnv = DotEnvFile.Load(Path.Combine(Environment.CurrentDirectory, ".env"));
+            gameDir ??= dotEnv.TryGetValue("DEFVALIDATOR_GAME_DIR", out var gameDirValue) ? gameDirValue : null;
+            modsConfig ??= dotEnv.TryGetValue("DEFVALIDATOR_MODS_CONFIG", out var modsConfigValue) ? modsConfigValue : null;
+
             if (string.IsNullOrWhiteSpace(gameDir))
             {
-                return Fail("Missing required option --game-dir.");
+                return Fail("Missing required option --game-dir. You can also set DEFVALIDATOR_GAME_DIR in .env.");
             }
 
             if (string.IsNullOrWhiteSpace(modsConfig))
             {
-                return Fail("Missing required option --mods-config.");
+                return Fail("Missing required option --mods-config. You can also set DEFVALIDATOR_MODS_CONFIG in .env.");
             }
 
             return new CliParseResult(
                 true,
                 null,
-                new ValidationOptions(modPath, gameDir, modsConfig, enabledPackageIds, strict, applyPatches),
-                format);
+                new ValidationOptions(modPath, gameDir, modsConfig, strict));
         }
         catch (Exception ex)
         {
@@ -149,5 +114,48 @@ internal static class CliParser
         return args[index];
     }
 
-    private static CliParseResult Fail(string message) => new(false, message, null, OutputFormat.Text);
+    private static CliParseResult Fail(string message) => new(false, message, null);
+}
+
+internal static class DotEnvFile
+{
+    public static IReadOnlyDictionary<string, string> Load(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return Empty;
+        }
+
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var rawLine in File.ReadAllLines(path))
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0 || line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            var separatorIndex = line.IndexOf('=');
+            if (separatorIndex <= 0)
+            {
+                continue;
+            }
+
+            var key = line[..separatorIndex].Trim();
+            var value = line[(separatorIndex + 1)..].Trim();
+            if (value.Length >= 2 && ((value.StartsWith('"') && value.EndsWith('"')) || (value.StartsWith("'") && value.EndsWith("'"))))
+            {
+                value = value[1..^1];
+            }
+
+            if (key.Length > 0)
+            {
+                values[key] = value;
+            }
+        }
+
+        return values;
+    }
+
+    private static readonly IReadOnlyDictionary<string, string> Empty = new Dictionary<string, string>(0, StringComparer.OrdinalIgnoreCase);
 }

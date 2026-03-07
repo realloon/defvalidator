@@ -61,10 +61,6 @@ internal static class ModContextBuilder
             activeIds.Add(id);
         }
 
-        foreach (var id in options.EnabledPackageIds)
-        {
-            activeIds.Add(id.Trim());
-        }
 
         activeIds.Add(target.PackageId);
 
@@ -108,13 +104,6 @@ internal static class ModContextBuilder
         }
 
         var modConfigOrder = ReadEnabledPackageIds(options.ModsConfigPath, diagnostics).ToList();
-        foreach (var id in options.EnabledPackageIds)
-        {
-            if (!modConfigOrder.Contains(id, StringComparer.OrdinalIgnoreCase))
-            {
-                modConfigOrder.Add(id);
-            }
-        }
 
         var loadOrder = TopologicalSort(selectedMods, modConfigOrder, target.PackageId);
         var orderedMods = loadOrder

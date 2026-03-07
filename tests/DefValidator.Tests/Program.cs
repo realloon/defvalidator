@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text.Json;
 using DefValidator.Core;
 
 var runner = new TestRunner();
@@ -21,8 +20,7 @@ internal sealed class TestRunner
             (nameof(UnknownClass_ProducesType001), UnknownClass_ProducesType001),
             (nameof(FieldTypeMismatch_ProducesType005), FieldTypeMismatch_ProducesType005),
             (nameof(CustomAssemblyAndCrossModReference_Succeeds), CustomAssemblyAndCrossModReference_Succeeds),
-            (nameof(PatchesAndNoPatches_AffectOutcome), PatchesAndNoPatches_AffectOutcome),
-            (nameof(UnsupportedPatchAndStrict_Return1), UnsupportedPatchAndStrict_Return1)
+            (nameof(DotEnv_FillsGameDirAndModsConfig), DotEnv_FillsGameDirAndModsConfig)
         ];
     }
 
@@ -69,12 +67,12 @@ internal sealed class TestRunner
         using var fixture = TestFixture.Create();
         fixture.WriteTargetDef("Defs.xml", "<Defs><ThingDef><statBase>1</statBase></ThingDef></Defs>");
 
-        var cli = await RunCliAsync(fixture.CreateCliArgs("--format", "json"));
+        var cli = await RunCliAsync(fixture.CreateCliArgs());
         Assert.Equal(1, cli.ExitCode);
 
         var normalized = fixture.Normalize(cli.StdOut);
-        Assert.Contains(normalized, "\"code\": \"RULE001\"");
-        Assert.Contains(normalized, "\"summary\"");
+        Assert.Contains(normalized, "RULE001");
+        Assert.Contains(normalized, "Missing defName.");
     }
 
     private async Task DuplicateDefName_ProducesXref001()
@@ -137,92 +135,18 @@ internal sealed class TestRunner
         Assert.Equal(0, result.Summary.ErrorCount);
     }
 
-    private async Task PatchesAndNoPatches_AffectOutcome()
-    {
-        using var fixture = TestFixture.Create(includeDependency: true, includeCustomAssembly: true);
-        fixture.WriteTargetDef(
-            "Defs.xml",
-            """
-            <Defs>
-              <ThingDef Name="BaseThing">
-                <defName>BaseThing</defName>
-                <statBase>1</statBase>
-              </ThingDef>
-              <ThingDef ParentName="BaseThing" MayRequire="missing.mod">
-                <defName>ConditionalChild</defName>
-                <statBase>oops</statBase>
-              </ThingDef>
-              <ThingDef>
-                <defName>PatchedThing</defName>
-                <statBase>oops</statBase>
-                <sound>MissingSound</sound>
-              </ThingDef>
-              <SoundDef>
-                <defName>ReplacementSound</defName>
-              </SoundDef>
-              <ThingDef>
-                <defName>RemoveMe</defName>
-                <statBase>1</statBase>
-              </ThingDef>
-            </Defs>
-            """);
-        fixture.WriteTargetPatch(
-            "Patch.xml",
-            """
-            <Patch>
-              <Operation Class="PatchOperationSequence">
-                <operations>
-                  <li Class="PatchOperationReplace">
-                    <xpath>/Defs/ThingDef[defName='PatchedThing']/statBase</xpath>
-                    <value><statBase>5</statBase></value>
-                  </li>
-                  <li Class="PatchOperationReplace">
-                    <xpath>/Defs/ThingDef[defName='PatchedThing']/sound</xpath>
-                    <value><sound>DepBeep</sound></value>
-                  </li>
-                  <li Class="PatchOperationAdd">
-                    <xpath>/Defs/ThingDef[defName='PatchedThing']</xpath>
-                    <value><accentColor>BaseBlue</accentColor></value>
-                  </li>
-                  <li Class="PatchOperationAttributeSet">
-                    <xpath>/Defs/ThingDef[defName='PatchedThing']</xpath>
-                    <attribute>Class</attribute>
-                    <value>TestModTypes.CustomThingDef</value>
-                  </li>
-                  <li Class="PatchOperationRemove">
-                    <xpath>/Defs/ThingDef[defName='RemoveMe']</xpath>
-                  </li>
-                  <li Class="PatchOperationInsert">
-                    <xpath>/Defs/SoundDef[defName='ReplacementSound']</xpath>
-                    <value><ThingDef><defName>InsertedThing</defName><statBase>2</statBase></ThingDef></value>
-                  </li>
-                  <li Class="PatchOperationAddModExtension">
-                    <xpath>/Defs/ThingDef[defName='PatchedThing']</xpath>
-                    <value><li Class="Verse.DefModExtension"><tag>patched</tag></li></value>
-                  </li>
-                </operations>
-              </Operation>
-            </Patch>
-            """);
 
-        var withPatches = await RunCliAsync(fixture.CreateCliArgs("--format", "json"));
-        Assert.Equal(0, withPatches.ExitCode);
-
-        var withoutPatches = await RunCliAsync(fixture.CreateCliArgs("--no-patches"));
-        Assert.Equal(1, withoutPatches.ExitCode);
-        Assert.Contains(withoutPatches.StdOut, "TYPE005");
-        Assert.Contains(withoutPatches.StdOut, "XREF002");
-    }
-
-    private async Task UnsupportedPatchAndStrict_Return1()
+    private async Task DotEnv_FillsGameDirAndModsConfig()
     {
         using var fixture = TestFixture.Create();
-        fixture.WriteTargetDef("Defs.xml", "<Defs><ThingDef><defName>Ok</defName><statBase>1</statBase></ThingDef></Defs>");
-        fixture.WriteTargetPatch("Patch.xml", "<Patch><Operation Class=\"PatchOperationNope\"><xpath>/Defs/ThingDef</xpath></Operation></Patch>");
+        fixture.WriteTargetDef("Defs.xml", "<Defs><ThingDef><defName>FromDotEnv</defName><statBase>1</statBase></ThingDef></Defs>");
+        fixture.WriteDotEnv("""
+DEFVALIDATOR_GAME_DIR=__GAME_DIR__
+DEFVALIDATOR_MODS_CONFIG=__MODS_CONFIG__
+""");
 
-        var strict = await RunCliAsync(fixture.CreateCliArgs("--strict"));
-        Assert.Equal(1, strict.ExitCode);
-        Assert.Contains(strict.StdOut, "PATCH001");
+        var cli = await RunCliAsync([fixture.TargetModPath], fixture.WorkingDirectory);
+        Assert.Equal(0, cli.ExitCode);
     }
 
     private static async Task<ValidationResult> ValidateAsync(TestFixture fixture)
@@ -231,14 +155,15 @@ internal sealed class TestRunner
         return await engine.ValidateAsync(fixture.CreateOptions(), CancellationToken.None);
     }
 
-    private static async Task<CliResult> RunCliAsync(params string[] args)
+    private static async Task<CliResult> RunCliAsync(string[] args, string? workingDirectory = null)
     {
         var repoRoot = TestFixture.FindRepoRoot();
-        var cliDll = Path.Combine(repoRoot, "src", "DefValidator.Cli", "bin", "Debug", "net10.0", "DefValidator.Cli.dll");
+        var cliDll = Path.Combine(repoRoot, "src", "DefValidator.Cli", "bin", "Debug", "net10.0", "defvalidator.dll");
         var startInfo = new ProcessStartInfo("dotnet")
         {
             RedirectStandardOutput = true,
-            RedirectStandardError = true
+            RedirectStandardError = true,
+            WorkingDirectory = workingDirectory ?? repoRoot
         };
 
         startInfo.ArgumentList.Add(cliDll);
@@ -263,6 +188,8 @@ internal sealed class TestFixture : IDisposable
     private readonly string _gameDir;
     private readonly string _modsConfigPath;
     private readonly string _targetModPath;
+    public string WorkingDirectory => _root;
+    public string TargetModPath => _targetModPath;
 
     private TestFixture(string root, string gameDir, string modsConfigPath, string targetModPath)
     {
@@ -296,13 +223,12 @@ internal sealed class TestFixture : IDisposable
         return new TestFixture(root, gameDir, modsConfigPath, targetModPath);
     }
 
-    public ValidationOptions CreateOptions() => new(_targetModPath, _gameDir, _modsConfigPath, [], Strict: false, ApplyPatches: true);
+    public ValidationOptions CreateOptions() => new(_targetModPath, _gameDir, _modsConfigPath, Strict: false);
 
     public string[] CreateCliArgs(params string[] extraArgs)
     {
         var args = new List<string>
         {
-            "validate",
             _targetModPath,
             "--game-dir",
             _gameDir,
@@ -320,11 +246,13 @@ internal sealed class TestFixture : IDisposable
         File.WriteAllText(fullPath, xml);
     }
 
-    public void WriteTargetPatch(string fileName, string xml)
+
+    public void WriteDotEnv(string content)
     {
-        var fullPath = Path.Combine(_targetModPath, "Patches", fileName);
-        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-        File.WriteAllText(fullPath, xml);
+        var normalized = content
+            .Replace("__GAME_DIR__", _gameDir, StringComparison.Ordinal)
+            .Replace("__MODS_CONFIG__", _modsConfigPath, StringComparison.Ordinal);
+        File.WriteAllText(Path.Combine(_root, ".env"), normalized);
     }
 
     public string Normalize(string value) => value.Replace(_root, "$ROOT", StringComparison.OrdinalIgnoreCase).Replace("\r\n", "\n");
