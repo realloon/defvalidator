@@ -208,8 +208,9 @@ internal static class XmlPipeline {
             return;
         }
 
-        foreach (var child in source.Root.Elements()) {
-            destination.Root!.Add(CloneElement(child));
+        foreach (var child in source.Root.Elements().ToList()) {
+            child.Remove();
+            destination.Root!.Add(child);
         }
     }
 
@@ -235,8 +236,9 @@ internal static class XmlPipeline {
 
                 Annotate(document.Root, filePath, mod.PackageId);
                 ApplyMayRequire(document.Root, activePackageIds);
-                foreach (var child in document.Root.Elements()) {
-                    destination.Add(CloneElement(child));
+                foreach (var child in document.Root.Elements().ToList()) {
+                    child.Remove();
+                    destination.Add(child);
                 }
             } catch (XmlException ex) {
                 diagnostics.Add("XML001", DiagnosticSeverity.Error, ex.Message, ValidationStage.XmlLoad, filePath,
@@ -304,7 +306,7 @@ internal static class XmlPipeline {
     };
 
     private static XDocument SanitizeCachedAggregate(XDocument document) {
-        var root = document.Root is null ? new XElement("Defs") : CloneElement(document.Root);
+        var root = document.Root ?? new XElement("Defs");
         foreach (var element in root.DescendantsAndSelf()) {
             element.RemoveAnnotations<SourceInfo>();
             foreach (var attribute in element.Attributes()
@@ -315,7 +317,7 @@ internal static class XmlPipeline {
             }
         }
 
-        return new XDocument(root);
+        return ReferenceEquals(document.Root, root) ? document : new XDocument(root);
     }
 
     private static bool TryReadCoreCache(string cachePath, out XDocument aggregate) {

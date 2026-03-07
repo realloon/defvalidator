@@ -47,7 +47,7 @@ internal static class CacheFiles {
                 return false;
             }
 
-            document = XDocument.Load(path, LoadOptions.PreserveWhitespace);
+            document = XDocument.Load(path, LoadOptions.None);
             return document.Root is not null;
         } catch {
             document = new XDocument(new XElement("Defs"));
