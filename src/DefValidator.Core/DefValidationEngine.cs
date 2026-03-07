@@ -302,7 +302,6 @@ internal static class InheritanceResolver {
         public string? ParentName => Element.Attribute("ParentName")?.Value;
     }
 }
-
 internal sealed partial class SemanticValidator(AssemblyCatalog catalog, DiagnosticBag diagnostics) {
     private static readonly System.Text.RegularExpressions.Regex DefNamePattern = MyRegex();
 
@@ -316,7 +315,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
 
         var duplicates = _defs
             .Where(static def => !string.IsNullOrWhiteSpace(def.DefName))
-            .GroupBy(static def => $"{def.Type.FullName ?? def.Type.Name}::{def.DefName}", StringComparer.Ordinal)
+            .GroupBy(static def => $"{def.Type.DisplayName}::{def.DefName}", StringComparer.Ordinal)
             .Where(static group => group.Count() > 1);
 
         foreach (var duplicate in duplicates) {
@@ -329,7 +328,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
 
         foreach (var reference in _references) {
             var matched = _defs.Any(def =>
-                AssemblyCatalog.IsAssignableTo(def.Type, reference.TargetType) &&
+                catalog.IsAssignableTo(def.Type, reference.TargetType) &&
                 string.Equals(def.DefName, reference.Value, StringComparison.Ordinal));
             if (!matched) {
                 diagnostics.Add("XREF002", DiagnosticSeverity.Error,
@@ -368,7 +367,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
         _defs.Add(new ResolvedDef(element, type, defName));
     }
 
-    private void ValidateObject(XElement element, Type declaredType, string defType, string? defName,
+    private void ValidateObject(XElement element, CatalogType declaredType, string defType, string? defName,
         bool isRoot = false) {
         var actualType = ResolveClassOverride(element, declaredType, defType, defName) ?? declaredType;
         var members = catalog.GetMembers(actualType);
@@ -378,8 +377,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
             .Where(static group => group.Count() > 1);
 
         foreach (var duplicate in duplicates) {
-            if (members.TryGetValue(duplicate.Key, out var member) &&
-                AssemblyCatalog.IsListType(AssemblyCatalog.GetMemberType(member), out _)) {
+            if (members.TryGetValue(duplicate.Key, out var member) && catalog.IsListType(member)) {
                 continue;
             }
 
@@ -399,14 +397,13 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
                 continue;
             }
 
-            var memberType = AssemblyCatalog.GetMemberType(member);
-            ValidateValue(child, memberType, defType, defName);
+            ValidateValue(child, member, defType, defName);
         }
     }
 
-    private void ValidateValue(XElement element, Type memberType, string defType, string? defName) {
-        memberType = AssemblyCatalog.UnwrapNullable(memberType);
-        if (AssemblyCatalog.IsListType(memberType, out var itemType)) {
+    private void ValidateValue(XElement element, CatalogMember member, string defType, string? defName) {
+        if (catalog.IsListType(member)) {
+            var itemType = catalog.GetListItemType(member);
             foreach (var item in element.Elements()) {
                 var effectiveItemType = ResolveClassOverride(item, itemType, defType, defName) ?? itemType;
                 if (catalog.IsDefType(effectiveItemType)) {
@@ -414,7 +411,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
                     continue;
                 }
 
-                if (AssemblyCatalog.IsScalar(effectiveItemType)) {
+                if (catalog.IsScalar(effectiveItemType)) {
                     ValidateScalar(item, effectiveItemType, defType, defName);
                 } else {
                     ValidateObject(item, effectiveItemType, defType, defName);
@@ -424,12 +421,13 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
             return;
         }
 
+        var memberType = catalog.GetMemberType(member);
         if (catalog.IsDefType(memberType)) {
             CollectReference(element, memberType, defType, defName);
             return;
         }
 
-        if (AssemblyCatalog.IsScalar(memberType)) {
+        if (catalog.IsScalar(memberType)) {
             ValidateScalar(element, memberType, defType, defName);
             return;
         }
@@ -443,10 +441,10 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
         ValidateObject(element, memberType, defType, defName);
     }
 
-    private void ValidateScalar(XElement element, Type type, string defType, string? defName) {
+    private void ValidateScalar(XElement element, CatalogType type, string defType, string? defName) {
         var value = (element.Value).Trim();
         var ok = type.IsEnum
-            ? Enum.GetNames(type).Any(name => string.Equals(name, value, StringComparison.Ordinal))
+            ? type.EnumNames.Any(name => string.Equals(name, value, StringComparison.Ordinal))
             : IsScalarValueAssignable(type, value);
 
         if (!ok) {
@@ -455,7 +453,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
         }
     }
 
-    private bool IsScalarValueAssignable(Type type, string value) {
+    private bool IsScalarValueAssignable(CatalogType type, string value) {
         return type.FullName switch {
             "System.String" => true,
             "System.Boolean" => bool.TryParse(value, out _),
@@ -479,7 +477,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
         };
     }
 
-    private Type? ResolveClassOverride(XElement element, Type declaredType, string defType, string? defName) {
+    private CatalogType? ResolveClassOverride(XElement element, CatalogType declaredType, string defType, string? defName) {
         var className = element.Attribute("Class")?.Value;
         if (string.IsNullOrWhiteSpace(className)) {
             return null;
@@ -492,7 +490,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
             return null;
         }
 
-        if (AssemblyCatalog.IsAssignableTo(resolvedType, declaredType)) {
+        if (catalog.IsAssignableTo(resolvedType, declaredType)) {
             return resolvedType;
         }
 
@@ -503,7 +501,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
         return null;
     }
 
-    private void CollectReference(XElement element, Type targetType, string defType, string? defName) {
+    private void CollectReference(XElement element, CatalogType targetType, string defType, string? defName) {
         var value = (element.Value).Trim();
         if (string.IsNullOrWhiteSpace(value)) {
             AddDiagnostic(element, "XREF003", DiagnosticSeverity.Error,
@@ -527,12 +525,12 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
 
     private sealed record PendingReference(
         SourceInfo Source,
-        Type TargetType,
+        CatalogType TargetType,
         string Value,
         string OwnerDefType,
         string? OwnerDefName);
 
-    private sealed record ResolvedDef(XElement Element, Type Type, string? DefName);
+    private sealed record ResolvedDef(XElement Element, CatalogType Type, string? DefName);
 
     [System.Text.RegularExpressions.GeneratedRegex("^[A-Za-z0-9_.-]+$",
         System.Text.RegularExpressions.RegexOptions.Compiled)]
