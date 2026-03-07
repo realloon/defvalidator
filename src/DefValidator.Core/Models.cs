@@ -1,15 +1,12 @@
 namespace DefValidator.Core;
 
-public enum DiagnosticSeverity
-{
+public enum DiagnosticSeverity {
     Info,
     Warning,
     Error
 }
 
-public enum ValidationStage
-{
-    Cli,
+public enum ValidationStage {
     Context,
     XmlLoad,
     Inheritance,
@@ -36,22 +33,15 @@ public sealed record Diagnostic(
     string? DefName,
     ValidationStage Stage);
 
-public sealed record ValidationSummary(int ErrorCount, int WarningCount, int InfoCount)
-{
-    public bool HasErrors => ErrorCount > 0;
-}
+public sealed record ValidationSummary(int ErrorCount, int WarningCount, int InfoCount) { }
 
-public sealed record ValidationResult(ValidationSummary Summary, IReadOnlyList<Diagnostic> Diagnostics)
-{
-    public int GetExitCode(bool strict)
-    {
-        if (Summary.ErrorCount > 0)
-        {
+public sealed record ValidationResult(ValidationSummary Summary, IReadOnlyList<Diagnostic> Diagnostics) {
+    public int GetExitCode(bool strict) {
+        if (Summary.ErrorCount > 0) {
             return 1;
         }
 
-        if (strict && Summary.WarningCount > 0)
-        {
+        if (strict && Summary.WarningCount > 0) {
             return 1;
         }
 
@@ -59,8 +49,7 @@ public sealed record ValidationResult(ValidationSummary Summary, IReadOnlyList<D
     }
 }
 
-internal sealed class DiagnosticBag
-{
+internal sealed class DiagnosticBag {
     private readonly List<Diagnostic> _items = [];
 
     public void Add(
@@ -73,15 +62,13 @@ internal sealed class DiagnosticBag
         int? column = null,
         string? packageId = null,
         string? defType = null,
-        string? defName = null)
-    {
+        string? defName = null) {
         _items.Add(new Diagnostic(code, severity, message, file, line, column, packageId, defType, defName, stage));
     }
 
     public IReadOnlyList<Diagnostic> Items => _items;
 
-    public ValidationResult ToResult()
-    {
+    public ValidationResult ToResult() {
         var summary = new ValidationSummary(
             _items.Count(static item => item.Severity == DiagnosticSeverity.Error),
             _items.Count(static item => item.Severity == DiagnosticSeverity.Warning),

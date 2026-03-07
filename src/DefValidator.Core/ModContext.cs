@@ -18,67 +18,61 @@ internal sealed record ModContext(
     string GameDirectory,
     string ModsConfigPath);
 
-internal static class ModContextBuilder
-{
+internal static class ModContextBuilder {
     private const string CorePackageId = "ludeon.rimworld";
     private const string WorkshopGameId = "294100";
 
-    public static ModContext? Build(ValidationOptions options, DiagnosticBag diagnostics)
-    {
-        if (!Directory.Exists(options.GameDirectory))
-        {
-            diagnostics.Add("CTX001", DiagnosticSeverity.Error, $"Game directory does not exist: {options.GameDirectory}", ValidationStage.Context, file: options.GameDirectory);
+    public static ModContext? Build(ValidationOptions options, DiagnosticBag diagnostics) {
+        if (!Directory.Exists(options.GameDirectory)) {
+            diagnostics.Add("CTX001", DiagnosticSeverity.Error,
+                $"Game directory does not exist: {options.GameDirectory}", ValidationStage.Context,
+                file: options.GameDirectory);
             return null;
         }
 
-        if (!Directory.Exists(options.ModPath))
-        {
-            diagnostics.Add("CTX002", DiagnosticSeverity.Error, $"Mod directory does not exist: {options.ModPath}", ValidationStage.Context, file: options.ModPath);
+        if (!Directory.Exists(options.ModPath)) {
+            diagnostics.Add("CTX002", DiagnosticSeverity.Error, $"Mod directory does not exist: {options.ModPath}",
+                ValidationStage.Context, file: options.ModPath);
             return null;
         }
 
-        if (!File.Exists(options.ModsConfigPath))
-        {
-            diagnostics.Add("CTX003", DiagnosticSeverity.Error, $"ModsConfig.xml does not exist: {options.ModsConfigPath}", ValidationStage.Context, file: options.ModsConfigPath);
+        if (!File.Exists(options.ModsConfigPath)) {
+            diagnostics.Add("CTX003", DiagnosticSeverity.Error,
+                $"ModsConfig.xml does not exist: {options.ModsConfigPath}", ValidationStage.Context,
+                file: options.ModsConfigPath);
             return null;
         }
 
         var discoveredMods = DiscoverMods(options.GameDirectory, options.ModPath, diagnostics);
-        if (discoveredMods.Count == 0)
-        {
-            diagnostics.Add("CTX004", DiagnosticSeverity.Error, "No mods could be discovered from --game-dir and target mod path.", ValidationStage.Context);
+        if (discoveredMods.Count == 0) {
+            diagnostics.Add("CTX004", DiagnosticSeverity.Error,
+                "No mods could be discovered from --game-dir and target mod path.", ValidationStage.Context);
             return null;
         }
 
         var target = discoveredMods.Values.FirstOrDefault(mod => PathsEqual(mod.RootPath, options.ModPath));
-        if (target is null)
-        {
-            diagnostics.Add("CTX005", DiagnosticSeverity.Error, $"Target mod was not discoverable: {options.ModPath}", ValidationStage.Context, file: options.ModPath);
+        if (target is null) {
+            diagnostics.Add("CTX005", DiagnosticSeverity.Error, $"Target mod was not discoverable: {options.ModPath}",
+                ValidationStage.Context, file: options.ModPath);
             return null;
         }
 
         var enabledPackageIds = ReadEnabledPackageIds(options.ModsConfigPath, diagnostics);
         var activeIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { CorePackageId, target.PackageId };
-        foreach (var id in enabledPackageIds)
-        {
+        foreach (var id in enabledPackageIds) {
             activeIds.Add(id);
         }
 
         var changed = true;
-        while (changed)
-        {
+        while (changed) {
             changed = false;
-            foreach (var activeId in activeIds.ToArray())
-            {
-                if (!discoveredMods.TryGetValue(activeId, out var mod))
-                {
+            foreach (var activeId in activeIds.ToArray()) {
+                if (!discoveredMods.TryGetValue(activeId, out var mod)) {
                     continue;
                 }
 
-                foreach (var dependency in mod.Dependencies)
-                {
-                    if (activeIds.Add(dependency))
-                    {
+                foreach (var dependency in mod.Dependencies) {
+                    if (activeIds.Add(dependency)) {
                         changed = true;
                     }
                 }
@@ -89,17 +83,18 @@ internal static class ModContextBuilder
             .Where(mod => activeIds.Contains(mod.PackageId) || PathsEqual(mod.RootPath, options.ModPath))
             .ToDictionary(static mod => mod.PackageId, StringComparer.OrdinalIgnoreCase);
 
-        foreach (var dependency in target.Dependencies)
-        {
-            if (!selectedMods.ContainsKey(dependency))
-            {
-                diagnostics.Add("CTX006", DiagnosticSeverity.Warning, $"Required dependency is not available: {dependency}", ValidationStage.Context, packageId: target.PackageId);
+        foreach (var dependency in target.Dependencies) {
+            if (!selectedMods.ContainsKey(dependency)) {
+                diagnostics.Add("CTX006", DiagnosticSeverity.Warning,
+                    $"Required dependency is not available: {dependency}", ValidationStage.Context,
+                    packageId: target.PackageId);
             }
         }
 
-        if (!selectedMods.ContainsKey(CorePackageId))
-        {
-            diagnostics.Add("CTX007", DiagnosticSeverity.Error, "Core mod (packageId ludeon.rimworld) was not found under the game directory.", ValidationStage.Context, file: options.GameDirectory);
+        if (!selectedMods.ContainsKey(CorePackageId)) {
+            diagnostics.Add("CTX007", DiagnosticSeverity.Error,
+                "Core mod (packageId ludeon.rimworld) was not found under the game directory.", ValidationStage.Context,
+                file: options.GameDirectory);
             return null;
         }
 
@@ -108,22 +103,20 @@ internal static class ModContextBuilder
             .Select((packageId, index) => selectedMods[packageId] with { LoadOrder = index })
             .ToList();
 
-        var resolvedTarget = orderedMods.First(mod => mod.PackageId.Equals(target.PackageId, StringComparison.OrdinalIgnoreCase));
+        var resolvedTarget =
+            orderedMods.First(mod => mod.PackageId.Equals(target.PackageId, StringComparison.OrdinalIgnoreCase));
         return new ModContext(resolvedTarget, orderedMods, activeIds, options.GameDirectory, options.ModsConfigPath);
     }
 
-    private static Dictionary<string, ModInfo> DiscoverMods(string gameDirectory, string targetModPath, DiagnosticBag diagnostics)
-    {
+    private static Dictionary<string, ModInfo> DiscoverMods(string gameDirectory, string targetModPath,
+        DiagnosticBag diagnostics) {
         var result = new Dictionary<string, ModInfo>(StringComparer.OrdinalIgnoreCase);
-        foreach (var root in EnumerateSearchRoots(gameDirectory, targetModPath))
-        {
-            if (!Directory.Exists(root))
-            {
+        foreach (var root in EnumerateSearchRoots(gameDirectory, targetModPath)) {
+            if (!Directory.Exists(root)) {
                 continue;
             }
 
-            foreach (var modDirectory in Directory.EnumerateDirectories(root))
-            {
+            foreach (var modDirectory in Directory.EnumerateDirectories(root)) {
                 TryAdd(result, modDirectory, diagnostics);
             }
         }
@@ -132,30 +125,24 @@ internal static class ModContextBuilder
         return result;
     }
 
-    private static IEnumerable<string> EnumerateSearchRoots(string gameDirectory, string targetModPath)
-    {
+    private static IEnumerable<string> EnumerateSearchRoots(string gameDirectory, string targetModPath) {
         yield return Path.Combine(gameDirectory, "Data");
         yield return Path.Combine(gameDirectory, "Mods");
 
         var parent = Directory.GetParent(targetModPath)?.FullName;
-        if (!string.IsNullOrWhiteSpace(parent))
-        {
+        if (!string.IsNullOrWhiteSpace(parent)) {
             yield return parent;
         }
 
-        foreach (var workshopRoot in EnumerateWorkshopRoots(gameDirectory))
-        {
+        foreach (var workshopRoot in EnumerateWorkshopRoots(gameDirectory)) {
             yield return workshopRoot;
         }
     }
 
-    private static IEnumerable<string> EnumerateWorkshopRoots(string gameDirectory)
-    {
+    private static IEnumerable<string> EnumerateWorkshopRoots(string gameDirectory) {
         var current = new DirectoryInfo(Path.GetFullPath(gameDirectory));
-        while (current is not null)
-        {
-            if (current.Name.Equals("steamapps", StringComparison.OrdinalIgnoreCase))
-            {
+        while (current is not null) {
+            if (current.Name.Equals("steamapps", StringComparison.OrdinalIgnoreCase)) {
                 yield return Path.Combine(current.FullName, "workshop", "content", WorkshopGameId);
                 yield break;
             }
@@ -164,24 +151,22 @@ internal static class ModContextBuilder
         }
     }
 
-    private static void TryAdd(IDictionary<string, ModInfo> mods, string modDirectory, DiagnosticBag diagnostics)
-    {
+    private static void TryAdd(IDictionary<string, ModInfo> mods, string modDirectory, DiagnosticBag diagnostics) {
         var aboutPath = Path.Combine(modDirectory, "About", "About.xml");
-        if (!File.Exists(aboutPath))
-        {
+        if (!File.Exists(aboutPath)) {
             return;
         }
 
-        try
-        {
+        try {
             var document = XDocument.Load(aboutPath, LoadOptions.PreserveWhitespace | LoadOptions.SetLineInfo);
-            var packageId = document.Descendants().FirstOrDefault(static element => element.Name.LocalName == "packageId")?.Value.Trim();
-            if (string.IsNullOrWhiteSpace(packageId))
-            {
+            var packageId = document.Descendants()
+                .FirstOrDefault(static element => element.Name.LocalName == "packageId")?.Value.Trim();
+            if (string.IsNullOrWhiteSpace(packageId)) {
                 packageId = Path.GetFileName(modDirectory);
             }
 
-            var name = document.Descendants().FirstOrDefault(static element => element.Name.LocalName == "name")?.Value.Trim() ?? packageId;
+            var name = document.Descendants().FirstOrDefault(static element => element.Name.LocalName == "name")?.Value
+                .Trim() ?? packageId;
             var dependencies = ReadDependencies(document);
             var loadFolders = ReadLoadFolders(modDirectory);
             var assemblyPaths = loadFolders
@@ -192,33 +177,28 @@ internal static class ModContextBuilder
                 .ToList();
 
             mods[packageId] = new ModInfo(packageId, name, modDirectory, dependencies, loadFolders, assemblyPaths, -1);
-        }
-        catch (Exception ex)
-        {
-            diagnostics.Add("XML002", DiagnosticSeverity.Error, $"Failed to read About.xml: {ex.Message}", ValidationStage.Context, file: aboutPath);
+        } catch (Exception ex) {
+            diagnostics.Add("XML002", DiagnosticSeverity.Error, $"Failed to read About.xml: {ex.Message}",
+                ValidationStage.Context, file: aboutPath);
         }
     }
 
-    private static IReadOnlyList<string> ReadDependencies(XDocument document)
-    {
+    private static IReadOnlyList<string> ReadDependencies(XDocument document) {
         return document.Descendants()
             .Where(static element => element.Name.LocalName is "modDependencies" or "dependencies")
             .Elements()
-            .Select(static element =>
-            {
-                if (element.Name.LocalName == "packageId")
-                {
+            .Select(static element => {
+                if (element.Name.LocalName == "packageId") {
                     return element.Value.Trim();
                 }
 
-                var nestedPackageId = element.Elements().FirstOrDefault(static child => child.Name.LocalName == "packageId");
-                if (nestedPackageId is not null)
-                {
+                var nestedPackageId =
+                    element.Elements().FirstOrDefault(static child => child.Name.LocalName == "packageId");
+                if (nestedPackageId is not null) {
                     return nestedPackageId.Value.Trim();
                 }
 
-                if (!element.HasElements)
-                {
+                if (!element.HasElements) {
                     return element.Value.Trim();
                 }
 
@@ -229,10 +209,8 @@ internal static class ModContextBuilder
             .ToList();
     }
 
-    private static IReadOnlyList<string> ReadEnabledPackageIds(string modsConfigPath, DiagnosticBag diagnostics)
-    {
-        try
-        {
+    private static IReadOnlyList<string> ReadEnabledPackageIds(string modsConfigPath, DiagnosticBag diagnostics) {
+        try {
             var document = XDocument.Load(modsConfigPath, LoadOptions.PreserveWhitespace | LoadOptions.SetLineInfo);
             return document.Descendants()
                 .Where(static element => element.Name.LocalName is "li" or "packageId")
@@ -240,24 +218,20 @@ internal static class ModContextBuilder
                 .Select(static element => element.Value.Trim())
                 .Where(static value => !string.IsNullOrWhiteSpace(value))
                 .ToList();
-        }
-        catch (Exception ex)
-        {
-            diagnostics.Add("XML003", DiagnosticSeverity.Error, $"Failed to read ModsConfig.xml: {ex.Message}", ValidationStage.Context, file: modsConfigPath);
+        } catch (Exception ex) {
+            diagnostics.Add("XML003", DiagnosticSeverity.Error, $"Failed to read ModsConfig.xml: {ex.Message}",
+                ValidationStage.Context, file: modsConfigPath);
             return [];
         }
     }
 
-    private static IReadOnlyList<string> ReadLoadFolders(string modDirectory)
-    {
+    private static IReadOnlyList<string> ReadLoadFolders(string modDirectory) {
         var loadFoldersPath = Path.Combine(modDirectory, "LoadFolders.xml");
-        if (!File.Exists(loadFoldersPath))
-        {
+        if (!File.Exists(loadFoldersPath)) {
             return ["."];
         }
 
-        try
-        {
+        try {
             var document = XDocument.Load(loadFoldersPath, LoadOptions.PreserveWhitespace | LoadOptions.SetLineInfo);
             var values = document.Descendants()
                 .Where(static element => !element.HasElements)
@@ -267,9 +241,7 @@ internal static class ModContextBuilder
                 .ToList();
 
             return values.Count == 0 ? ["."] : values;
-        }
-        catch
-        {
+        } catch {
             return ["."];
         }
     }
@@ -277,43 +249,34 @@ internal static class ModContextBuilder
     private static IReadOnlyList<string> TopologicalSort(
         IReadOnlyDictionary<string, ModInfo> mods,
         IReadOnlyList<string> preferredOrder,
-        string targetPackageId)
-    {
+        string targetPackageId) {
         var weights = preferredOrder
             .Select((packageId, index) => new { packageId, index })
             .ToDictionary(static item => item.packageId, static item => item.index, StringComparer.OrdinalIgnoreCase);
 
         var remaining = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var mod in mods.Values)
-        {
+        foreach (var mod in mods.Values) {
             remaining[mod.PackageId] = mod.Dependencies
                 .Where(mods.ContainsKey)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
 
         var result = new List<string>();
-        while (remaining.Count > 0)
-        {
+        while (remaining.Count > 0) {
             var next = remaining
                 .Where(static pair => pair.Value.Count == 0)
                 .Select(static pair => pair.Key)
                 .OrderBy(id => id.Equals(CorePackageId, StringComparison.OrdinalIgnoreCase) ? -1 : 0)
                 .ThenBy(id => id.Equals(targetPackageId, StringComparison.OrdinalIgnoreCase) ? 1 : 0)
-                .ThenBy(id => weights.TryGetValue(id, out var weight) ? weight : int.MaxValue)
+                .ThenBy(id => weights.GetValueOrDefault(id, int.MaxValue))
                 .ThenBy(static id => id, StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault();
-
-            if (next is null)
-            {
-                next = remaining.Keys
-                    .OrderBy(id => weights.TryGetValue(id, out var weight) ? weight : int.MaxValue)
-                    .ThenBy(static id => id, StringComparer.OrdinalIgnoreCase)
-                    .First();
-            }
+                .FirstOrDefault() ?? remaining.Keys
+                .OrderBy(id => weights.GetValueOrDefault(id, int.MaxValue))
+                .ThenBy(static id => id, StringComparer.OrdinalIgnoreCase)
+                .First();
 
             remaining.Remove(next);
-            foreach (var dependencySet in remaining.Values)
-            {
+            foreach (var dependencySet in remaining.Values) {
                 dependencySet.Remove(next);
             }
 
@@ -328,5 +291,6 @@ internal static class ModContextBuilder
     }
 
     private static bool PathsEqual(string left, string right) =>
-        string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+        string.Equals(Path.GetFullPath(left), Path.GetFullPath(right),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 }
