@@ -43,7 +43,7 @@ internal sealed class AssemblyCatalog {
             .ToList());
 
         var coreTypes = MeasureValue("load_core_types", () => LoadCoreTypes(coreMetadataAssemblyPaths, resolverAssemblies, diagnostics, profiler));
-        var modTypes = MeasureValue("load_mod_types", () => LoadAssemblyTypes(modAssemblyPaths, resolverAssemblies, diagnostics, profiler));
+        var modTypes = MeasureValue("load_mod_types", () => LoadModTypes(modAssemblyPaths, resolverAssemblies, diagnostics, profiler));
 
         var catalog = new AssemblyCatalog();
         Measure("register_types", () => {
@@ -244,14 +244,40 @@ internal sealed class AssemblyCatalog {
         IReadOnlyList<string> resolverAssemblies,
         DiagnosticBag diagnostics,
         StepProfiler? profiler = null) {
-        var cachePath = GetCoreCachePath(gameAssemblyPaths);
+        return LoadCachedAssemblyTypes("core-types", "core", gameAssemblyPaths, gameAssemblyPaths, resolverAssemblies,
+            diagnostics, profiler);
+    }
+
+    private static IReadOnlyList<CatalogType> LoadModTypes(
+        IReadOnlyList<string> modAssemblyPaths,
+        IReadOnlyList<string> resolverAssemblies,
+        DiagnosticBag diagnostics,
+        StepProfiler? profiler = null) {
+        return LoadCachedAssemblyTypes("mod-types", "mod", modAssemblyPaths, modAssemblyPaths, resolverAssemblies,
+            diagnostics, profiler);
+    }
+
+    private static IReadOnlyList<CatalogType> LoadCachedAssemblyTypes(
+        string cachePrefix,
+        string profilePrefix,
+        IReadOnlyList<string> fingerprintAssemblyPaths,
+        IReadOnlyList<string> targetAssemblyPaths,
+        IReadOnlyList<string> resolverAssemblies,
+        DiagnosticBag diagnostics,
+        StepProfiler? profiler = null) {
+        if (targetAssemblyPaths.Count == 0) {
+            return [];
+        }
+
+        var cachePath = GetAssemblyCachePath(cachePrefix, fingerprintAssemblyPaths);
         IReadOnlyList<CatalogType> cachedTypes = [];
-        if (MeasureValue("read_core_types_cache", () => TryReadCache(cachePath, out cachedTypes))) {
+        if (MeasureValue($"read_{profilePrefix}_types_cache", () => TryReadCache(cachePath, out cachedTypes))) {
             return cachedTypes;
         }
 
-        var loadedTypes = MeasureValue("load_core_types_from_assemblies", () => LoadAssemblyTypes(gameAssemblyPaths, resolverAssemblies, diagnostics, profiler));
-        Measure("write_core_types_cache", () => TryWriteCache(cachePath, loadedTypes));
+        var loadedTypes = MeasureValue($"load_{profilePrefix}_types_from_assemblies",
+            () => LoadAssemblyTypes(targetAssemblyPaths, resolverAssemblies, diagnostics, profiler));
+        Measure($"write_{profilePrefix}_types_cache", () => TryWriteCache(cachePath, loadedTypes));
         return loadedTypes;
 
         T MeasureValue<T>(string name, Func<T> action) {
@@ -454,8 +480,8 @@ internal sealed class AssemblyCatalog {
         }
     }
 
-    private static string GetCoreCachePath(IReadOnlyList<string> gameAssemblyPaths) {
-        return CacheFiles.BuildPath("core-types", "mpk", gameAssemblyPaths
+    private static string GetAssemblyCachePath(string prefix, IReadOnlyList<string> assemblyPaths) {
+        return CacheFiles.BuildPath(prefix, "mpk", assemblyPaths
             .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)
             .Select(static path => {
                 var info = new FileInfo(path);
