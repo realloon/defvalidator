@@ -20,8 +20,13 @@ internal sealed class TestRunner
             (nameof(UnknownClass_ProducesType001), UnknownClass_ProducesType001),
             (nameof(FieldTypeMismatch_ProducesType005), FieldTypeMismatch_ProducesType005),
             (nameof(CustomAssemblyAndCrossModReference_Succeeds), CustomAssemblyAndCrossModReference_Succeeds),
+            (nameof(DependencyParsing_UsesPackageIdOnly), DependencyParsing_UsesPackageIdOnly),
+            (nameof(WorkshopDependency_IsDiscovered), WorkshopDependency_IsDiscovered),
             (nameof(FiltersOutExternalContextNoise), FiltersOutExternalContextNoise),
-            (nameof(DotEnv_FillsGameDirAndModsConfig), DotEnv_FillsGameDirAndModsConfig)
+            (nameof(DotEnv_FillsGameDirAndModsConfig), DotEnv_FillsGameDirAndModsConfig),
+            (nameof(InheritedDef_KeepsDefName), InheritedDef_KeepsDefName),
+            (nameof(NonPublicSerializedFields_AreRecognized), NonPublicSerializedFields_AreRecognized),
+            (nameof(LoadAlias_IsRecognized), LoadAlias_IsRecognized)
         ];
     }
 
@@ -137,6 +142,49 @@ internal sealed class TestRunner
     }
 
 
+    private async Task DependencyParsing_UsesPackageIdOnly()
+    {
+        using var fixture = TestFixture.Create();
+        fixture.WriteTargetAbout("""
+<ModMetaData>
+  <name>Target</name>
+  <packageId>target.mod</packageId>
+  <modDependencies>
+    <li>
+      <packageId>brrainz.harmony</packageId>
+      <displayName>Harmony Display</displayName>
+      <downloadUrl>steam://url/CommunityFilePage/2009463077</downloadUrl>
+    </li>
+  </modDependencies>
+</ModMetaData>
+""");
+        fixture.WriteTargetDef("Defs.xml", "<Defs><ThingDef><defName>TargetOk</defName><statBase>1</statBase></ThingDef></Defs>");
+
+        var cli = await RunCliAsync(fixture.CreateCliArgs());
+        Assert.Equal(0, cli.ExitCode);
+        Assert.Contains(fixture.Normalize(cli.StdOut), "CTX006");
+        Assert.Contains(fixture.Normalize(cli.StdOut), "brrainz.harmony");
+        Assert.DoesNotContain(fixture.Normalize(cli.StdOut), "steam://");
+        Assert.DoesNotContain(fixture.Normalize(cli.StdOut), "Harmony Display");
+    }
+
+    private async Task WorkshopDependency_IsDiscovered()
+    {
+        using var fixture = TestFixture.CreateWithWorkshopDependency();
+        fixture.WriteTargetAbout("""
+<ModMetaData>
+  <name>Target</name>
+  <packageId>target.mod</packageId>
+  <modDependencies><li>brrainz.harmony</li></modDependencies>
+</ModMetaData>
+""");
+        fixture.WriteTargetDef("Defs.xml", "<Defs><ThingDef><defName>TargetOk</defName><statBase>1</statBase></ThingDef></Defs>");
+
+        var cli = await RunCliAsync(fixture.CreateCliArgs());
+        Assert.Equal(0, cli.ExitCode);
+        Assert.DoesNotContain(fixture.Normalize(cli.StdOut), "CTX006");
+    }
+
     private async Task FiltersOutExternalContextNoise()
     {
         using var fixture = TestFixture.Create();
@@ -160,6 +208,77 @@ DEFVALIDATOR_MODS_CONFIG=__MODS_CONFIG__
 
         var cli = await RunCliAsync([fixture.TargetModPath], fixture.WorkingDirectory);
         Assert.Equal(0, cli.ExitCode);
+    }
+
+    private async Task InheritedDef_KeepsDefName()
+    {
+        using var fixture = TestFixture.Create();
+        fixture.WriteCoreDef("BaseDefs.xml", """
+<Defs><ThingDef Name="BaseThing"><statBase>1</statBase></ThingDef></Defs>
+""");
+        fixture.WriteTargetDef("Defs.xml", """
+<Defs><ThingDef ParentName="BaseThing"><defName>ChildThing</defName></ThingDef></Defs>
+""");
+
+        var cli = await RunCliAsync(fixture.CreateCliArgs());
+        Assert.Equal(0, cli.ExitCode);
+        Assert.DoesNotContain(fixture.Normalize(cli.StdOut), "RULE001");
+    }
+
+    private async Task NonPublicSerializedFields_AreRecognized()
+    {
+        using var fixture = TestFixture.Create();
+        fixture.WriteTargetDef(
+            "Defs.xml",
+            """
+            <Defs>
+              <HiddenFieldDef>
+                <defName>HiddenOk</defName>
+                <count>2</count>
+              </HiddenFieldDef>
+              <RecipeDef>
+                <defName>RecipeOk</defName>
+                <ingredients>
+                  <li>
+                    <filter>
+                      <thingDefs>
+                        <li>CoreThing</li>
+                      </thingDefs>
+                    </filter>
+                    <count>1</count>
+                  </li>
+                </ingredients>
+                <recipeUsers>
+                  <li>CoreThing</li>
+                </recipeUsers>
+              </RecipeDef>
+            </Defs>
+            """);
+        fixture.WriteCoreDef("ThingDefs.xml", "<Defs><ThingDef><defName>CoreThing</defName><statBase>1</statBase></ThingDef></Defs>");
+
+        var cli = await RunCliAsync(fixture.CreateCliArgs());
+        Assert.Equal(0, cli.ExitCode);
+        Assert.DoesNotContain(fixture.Normalize(cli.StdOut), "TYPE002");
+    }
+
+
+    private async Task LoadAlias_IsRecognized()
+    {
+        using var fixture = TestFixture.Create();
+        fixture.WriteTargetDef(
+            "Defs.xml",
+            """
+            <Defs>
+              <AliasedFieldDef>
+                <defName>AliasOk</defName>
+                <priority>2</priority>
+              </AliasedFieldDef>
+            </Defs>
+            """);
+
+        var cli = await RunCliAsync(fixture.CreateCliArgs());
+        Assert.Equal(0, cli.ExitCode);
+        Assert.DoesNotContain(fixture.Normalize(cli.StdOut), "TYPE002");
     }
 
     private static async Task<ValidationResult> ValidateAsync(TestFixture fixture)
@@ -236,6 +355,23 @@ internal sealed class TestFixture : IDisposable
         return new TestFixture(root, gameDir, modsConfigPath, targetModPath);
     }
 
+    public static TestFixture CreateWithWorkshopDependency()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "defvalidator-tests", Guid.NewGuid().ToString("N"));
+        var steamApps = Path.Combine(root, "steamapps");
+        var gameDir = Path.Combine(steamApps, "common", "RimWorld", "RimWorldMac.app");
+        var modsConfigPath = Path.Combine(root, "ModsConfig.xml");
+        var targetModPath = Path.Combine(gameDir, "Mods", "TargetMod");
+
+        Directory.CreateDirectory(root);
+        CreateCore(gameDir);
+        CreateTarget(targetModPath, includeCustomAssembly: false);
+        CreateWorkshopDependency(steamApps);
+        File.WriteAllText(modsConfigPath, "<ModsConfigData><activeMods><li>ludeon.rimworld</li></activeMods></ModsConfigData>");
+
+        return new TestFixture(root, gameDir, modsConfigPath, targetModPath);
+    }
+
     public ValidationOptions CreateOptions() => new(_targetModPath, _gameDir, _modsConfigPath, Strict: false);
 
     public string[] CreateCliArgs(params string[] extraArgs)
@@ -264,6 +400,11 @@ internal sealed class TestFixture : IDisposable
         var fullPath = Path.Combine(_gameDir, "Data", "Core", "Defs", fileName);
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
         File.WriteAllText(fullPath, xml);
+    }
+
+    public void WriteTargetAbout(string xml)
+    {
+        File.WriteAllText(Path.Combine(_targetModPath, "About", "About.xml"), xml);
     }
 
     public void WriteDotEnv(string content)
@@ -298,10 +439,13 @@ internal sealed class TestFixture : IDisposable
         Directory.CreateDirectory(Path.Combine(core, "About"));
         Directory.CreateDirectory(Path.Combine(core, "Defs"));
         Directory.CreateDirectory(Path.Combine(core, "Assemblies"));
+        var managed = Path.Combine(gameDir, "Contents", "Resources", "Data", "Managed");
+        Directory.CreateDirectory(managed);
         File.WriteAllText(Path.Combine(core, "About", "About.xml"), "<ModMetaData><name>Core</name><packageId>ludeon.rimworld</packageId></ModMetaData>");
         File.WriteAllText(Path.Combine(core, "LoadFolders.xml"), "<loadFolders><li>.</li></loadFolders>");
         File.WriteAllText(Path.Combine(core, "Defs", "CoreDefs.xml"), "<Defs><SoundDef><defName>CoreSound</defName></SoundDef><ColorDef><defName>BaseBlue</defName><rgb>0000ff</rgb></ColorDef></Defs>");
         File.Copy(Path.Combine(FindRepoRoot(), "tests", "FixtureVerse", "bin", "Debug", "net10.0", "Verse.dll"), Path.Combine(core, "Assemblies", "Verse.dll"), overwrite: true);
+        File.Copy(Path.Combine(FindRepoRoot(), "tests", "FixtureVerse", "bin", "Debug", "net10.0", "Verse.dll"), Path.Combine(managed, "Verse.dll"), overwrite: true);
     }
 
     private static void CreateDependency(string gameDir)
@@ -311,6 +455,13 @@ internal sealed class TestFixture : IDisposable
         Directory.CreateDirectory(Path.Combine(mod, "Defs"));
         File.WriteAllText(Path.Combine(mod, "About", "About.xml"), "<ModMetaData><name>Dep</name><packageId>dep.mod</packageId></ModMetaData>");
         File.WriteAllText(Path.Combine(mod, "Defs", "Defs.xml"), "<Defs><SoundDef><defName>DepBeep</defName></SoundDef></Defs>");
+    }
+
+    private static void CreateWorkshopDependency(string steamApps)
+    {
+        var mod = Path.Combine(steamApps, "workshop", "content", "294100", "2009463077");
+        Directory.CreateDirectory(Path.Combine(mod, "About"));
+        File.WriteAllText(Path.Combine(mod, "About", "About.xml"), "<ModMetaData><name>Harmony</name><packageId>brrainz.harmony</packageId></ModMetaData>");
     }
 
     private static void CreateTarget(string targetModPath, bool includeCustomAssembly)

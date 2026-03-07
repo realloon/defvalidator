@@ -1,5 +1,4 @@
 using System.Reflection;
-using System.Runtime.Loader;
 
 namespace DefValidator.Core;
 
@@ -7,9 +6,11 @@ internal sealed class AssemblyCatalog
 {
     private readonly Dictionary<string, Type> _typesByName = new(StringComparer.Ordinal);
     private readonly Dictionary<Type, IReadOnlyDictionary<string, MemberInfo>> _memberCache = new();
+    private readonly MetadataLoadContext? _loadContext;
 
-    private AssemblyCatalog(Type? defBaseType, Type? compPropertiesBaseType)
+    private AssemblyCatalog(MetadataLoadContext? loadContext, Type? defBaseType, Type? compPropertiesBaseType)
     {
+        _loadContext = loadContext;
         DefBaseType = defBaseType;
         CompPropertiesBaseType = compPropertiesBaseType;
     }
@@ -18,11 +19,10 @@ internal sealed class AssemblyCatalog
 
     public Type? CompPropertiesBaseType { get; }
 
-
     public static AssemblyCatalog Load(ModContext context, DiagnosticBag diagnostics)
     {
-        var assemblyPaths = context.ModsInLoadOrder
-            .SelectMany(static mod => mod.AssemblyPaths)
+        var assemblyPaths = EnumerateGameManagedAssemblies(context.GameDirectory)
+            .Concat(context.ModsInLoadOrder.SelectMany(static mod => mod.AssemblyPaths))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -37,9 +37,9 @@ internal sealed class AssemblyCatalog
             .Concat(runtimeAssemblies.Values)
             .GroupBy(static path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)
             .Select(static group => group.First())
-            .ToDictionary(static path => Path.GetFileName(path), static path => path, StringComparer.OrdinalIgnoreCase);
+            .ToList();
 
-        var loadContext = new MetadataAssemblyLoadContext(knownAssemblies);
+        var loadContext = new MetadataLoadContext(new PathAssemblyResolver(knownAssemblies), ResolveCoreAssemblyName(knownAssemblies));
         var assemblies = new List<Assembly>();
         foreach (var path in assemblyPaths)
         {
@@ -53,19 +53,18 @@ internal sealed class AssemblyCatalog
             }
         }
 
+        var allTypes = assemblies.SelectMany(SafeGetTypes).ToList();
         var catalog = new AssemblyCatalog(
-            assemblies.SelectMany(SafeGetTypes).FirstOrDefault(static type => type.FullName == "Verse.Def"),
-            assemblies.SelectMany(SafeGetTypes).FirstOrDefault(static type => type.FullName == "Verse.CompProperties"));
+            loadContext,
+            allTypes.FirstOrDefault(static type => type.FullName == "Verse.Def"),
+            allTypes.FirstOrDefault(static type => type.FullName == "Verse.CompProperties"));
 
-        foreach (var assembly in assemblies)
+        foreach (var type in allTypes)
         {
-            foreach (var type in SafeGetTypes(assembly))
+            catalog._typesByName.TryAdd(type.Name, type);
+            if (!string.IsNullOrWhiteSpace(type.FullName))
             {
-                catalog._typesByName.TryAdd(type.Name, type);
-                if (!string.IsNullOrWhiteSpace(type.FullName))
-                {
-                    catalog._typesByName.TryAdd(type.FullName!, type);
-                }
+                catalog._typesByName.TryAdd(type.FullName!, type);
             }
         }
 
@@ -87,7 +86,6 @@ internal sealed class AssemblyCatalog
 
     public bool IsCompPropertiesType(Type? type) => type is not null && CompPropertiesBaseType is not null && IsAssignableTo(type, CompPropertiesBaseType);
 
-
     public IReadOnlyDictionary<string, MemberInfo> GetMembers(Type type)
     {
         if (_memberCache.TryGetValue(type, out var cached))
@@ -95,12 +93,28 @@ internal sealed class AssemblyCatalog
             return cached;
         }
 
-        var members = type
-            .GetMembers(BindingFlags.Instance | BindingFlags.Public)
-            .Where(static member => member.MemberType is MemberTypes.Field or MemberTypes.Property)
-            .Where(static member => member is not PropertyInfo property || property.CanRead)
-            .GroupBy(static member => member.Name, StringComparer.Ordinal)
-            .ToDictionary(static group => group.Key, static group => group.First(), StringComparer.Ordinal);
+        var members = new Dictionary<string, MemberInfo>(StringComparer.Ordinal);
+        for (var current = type; current is not null; current = current.BaseType)
+        {
+            foreach (var member in current.GetMembers(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+            {
+                if (member.MemberType is not (MemberTypes.Field or MemberTypes.Property))
+                {
+                    continue;
+                }
+
+                if (member is PropertyInfo property && !property.CanRead)
+                {
+                    continue;
+                }
+
+                members.TryAdd(member.Name, member);
+                foreach (var alias in GetAliases(member))
+                {
+                    members.TryAdd(alias, member);
+                }
+            }
+        }
 
         _memberCache[type] = members;
         return members;
@@ -113,6 +127,30 @@ internal sealed class AssemblyCatalog
         _ => typeof(object)
     };
 
+
+    private static IEnumerable<string> GetAliases(MemberInfo member)
+    {
+        foreach (var attribute in CustomAttributeData.GetCustomAttributes(member))
+        {
+            if (!string.Equals(attribute.AttributeType.Name, "LoadAliasAttribute", StringComparison.Ordinal)
+                && !string.Equals(attribute.AttributeType.FullName, "Verse.LoadAliasAttribute", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (attribute.ConstructorArguments.Count == 0)
+            {
+                continue;
+            }
+
+            var value = attribute.ConstructorArguments[0].Value as string;
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                yield return value;
+            }
+        }
+    }
+
     public static bool IsListType(Type type, out Type itemType)
     {
         if (type.IsArray)
@@ -124,7 +162,7 @@ internal sealed class AssemblyCatalog
         var enumerable = type
             .GetInterfaces()
             .Concat([type])
-            .FirstOrDefault(static candidate => candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(IEnumerable<>));
+            .FirstOrDefault(static candidate => candidate.IsGenericType && candidate.GetGenericTypeDefinition().FullName == "System.Collections.Generic.IEnumerable`1");
 
         if (enumerable is not null)
         {
@@ -136,22 +174,69 @@ internal sealed class AssemblyCatalog
         return false;
     }
 
-    public static Type UnwrapNullable(Type type) => Nullable.GetUnderlyingType(type) ?? type;
+    public static Type UnwrapNullable(Type type)
+    {
+        return type.IsGenericType && type.GetGenericTypeDefinition().FullName == "System.Nullable`1"
+            ? type.GetGenericArguments()[0]
+            : type;
+    }
 
     public static bool IsScalar(Type type)
     {
         type = UnwrapNullable(type);
-        return type.IsPrimitive || type.IsEnum || type == typeof(string) || type == typeof(decimal) || type == typeof(Type);
+        return type.IsPrimitive
+               || type.IsEnum
+               || type.FullName is "System.String" or "System.Decimal" or "System.Type";
     }
 
     public static bool IsAssignableTo(Type candidate, Type target)
     {
+        if (candidate == target || candidate.FullName == target.FullName)
+        {
+            return true;
+        }
+
         if (target.IsAssignableFrom(candidate))
         {
             return true;
         }
 
-        return candidate.FullName == target.FullName || candidate.BaseType is not null && IsAssignableTo(candidate.BaseType, target);
+        return candidate.BaseType is not null && IsAssignableTo(candidate.BaseType, target);
+    }
+
+    private static IEnumerable<string> EnumerateGameManagedAssemblies(string gameDirectory)
+    {
+        var candidates = new[]
+        {
+            Path.Combine(gameDirectory, "Contents", "Resources", "Data", "Managed"),
+            Path.Combine(gameDirectory, "Data", "Managed"),
+            Path.Combine(gameDirectory, "RimWorldWin64_Data", "Managed"),
+            Path.Combine(gameDirectory, "RimWorldLinux_Data", "Managed"),
+            Path.Combine(gameDirectory, "RimWorldMac.app", "Contents", "Resources", "Data", "Managed")
+        };
+
+        foreach (var directory in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!Directory.Exists(directory))
+            {
+                continue;
+            }
+
+            foreach (var filePath in Directory.EnumerateFiles(directory, "*.dll", SearchOption.TopDirectoryOnly))
+            {
+                yield return filePath;
+            }
+        }
+    }
+
+    private static string ResolveCoreAssemblyName(IReadOnlyList<string> knownAssemblies)
+    {
+        if (knownAssemblies.Any(static path => string.Equals(Path.GetFileName(path), "mscorlib.dll", StringComparison.OrdinalIgnoreCase)))
+        {
+            return "mscorlib";
+        }
+
+        return typeof(object).Assembly.GetName().Name ?? "System.Private.CoreLib";
     }
 
     private static IEnumerable<Type> SafeGetTypes(Assembly assembly)
@@ -163,19 +248,6 @@ internal sealed class AssemblyCatalog
         catch (ReflectionTypeLoadException ex)
         {
             return ex.Types.Where(static type => type is not null)!;
-        }
-    }
-
-    private sealed class MetadataAssemblyLoadContext(IReadOnlyDictionary<string, string> knownAssemblies) : AssemblyLoadContext(isCollectible: true)
-    {
-        protected override Assembly? Load(AssemblyName assemblyName)
-        {
-            if (knownAssemblies.TryGetValue($"{assemblyName.Name}.dll", out var path) && File.Exists(path))
-            {
-                return LoadFromAssemblyPath(path);
-            }
-
-            return null;
         }
     }
 }

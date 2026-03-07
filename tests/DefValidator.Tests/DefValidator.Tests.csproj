@@ -14,4 +14,10 @@
     <ProjectReference Include="../FixtureModTypes/FixtureModTypes.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Reference Include="System.Reflection.MetadataLoadContext">
+      <HintPath>$(MSBuildSDKsPath)/../System.Reflection.MetadataLoadContext.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
 </Project>

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection;
 using System.Xml;
 using System.Xml.Linq;
@@ -301,16 +302,15 @@ internal static class InheritanceResolver
         current.ReplaceAttributes(child.Attributes().Select(static attribute => new XAttribute(attribute)));
         CopySource(current, child);
 
-        var textNode = child.Nodes().OfType<XText>().FirstOrDefault();
-        if (textNode is not null)
-        {
-            current.Value = textNode.Value;
-            return;
-        }
-
         var elementChildren = child.Elements().ToList();
+        var textValue = string.Concat(child.Nodes().OfType<XText>().Select(static text => text.Value));
         if (elementChildren.Count == 0)
         {
+            if (textValue.Length > 0)
+            {
+                current.Value = textValue;
+            }
+
             return;
         }
 
@@ -521,18 +521,36 @@ internal sealed class SemanticValidator(AssemblyCatalog catalog, DiagnosticBag d
         var value = (element.Value ?? string.Empty).Trim();
         var ok = type.IsEnum
             ? Enum.GetNames(type).Any(name => string.Equals(name, value, StringComparison.Ordinal))
-            : type == typeof(string)
-              || type == typeof(int) && int.TryParse(value, out _)
-              || type == typeof(float) && float.TryParse(value, out _)
-              || type == typeof(double) && double.TryParse(value, out _)
-              || type == typeof(decimal) && decimal.TryParse(value, out _)
-              || type == typeof(bool) && bool.TryParse(value, out _)
-              || type == typeof(Type) && catalog.FindType(value) is not null;
+            : IsScalarValueAssignable(type, value);
 
         if (!ok)
         {
             AddDiagnostic(element, "TYPE005", DiagnosticSeverity.Error, $"Value '{value}' is not assignable to {type.Name}.", ValidationStage.Type, defType, defName);
         }
+    }
+
+    private bool IsScalarValueAssignable(Type type, string value)
+    {
+        return type.FullName switch
+        {
+            "System.String" => true,
+            "System.Boolean" => bool.TryParse(value, out _),
+            "System.Char" => value.Length == 1,
+            "System.SByte" => sbyte.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _),
+            "System.Byte" => byte.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _),
+            "System.Int16" => short.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _),
+            "System.UInt16" => ushort.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _),
+            "System.Int32" => int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _),
+            "System.UInt32" => uint.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _),
+            "System.Int64" => long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _),
+            "System.UInt64" => ulong.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _),
+            "System.Single" => float.TryParse(value, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out _),
+            "System.Double" => double.TryParse(value, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out _),
+            "System.Decimal" => decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out _),
+            "System.Type" => catalog.FindType(value) is not null,
+            _ when type.IsPrimitive => value.Length > 0,
+            _ => false
+        };
     }
 
     private Type? ResolveClassOverride(XElement element, Type declaredType, string defType, string? defName)

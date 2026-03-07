@@ -20,6 +20,9 @@ internal sealed record ModContext(
 
 internal static class ModContextBuilder
 {
+    private const string CorePackageId = "ludeon.rimworld";
+    private const string WorkshopGameId = "294100";
+
     public static ModContext? Build(ValidationOptions options, DiagnosticBag diagnostics)
     {
         if (!Directory.Exists(options.GameDirectory))
@@ -47,22 +50,19 @@ internal static class ModContextBuilder
             return null;
         }
 
-        var target = discoveredMods.Values.FirstOrDefault(static mod => Path.GetFullPath(mod.RootPath) == Path.GetFullPath(mod.RootPath));
-        target = discoveredMods.Values.FirstOrDefault(mod => PathsEqual(mod.RootPath, options.ModPath));
+        var target = discoveredMods.Values.FirstOrDefault(mod => PathsEqual(mod.RootPath, options.ModPath));
         if (target is null)
         {
             diagnostics.Add("CTX005", DiagnosticSeverity.Error, $"Target mod was not discoverable: {options.ModPath}", ValidationStage.Context, file: options.ModPath);
             return null;
         }
 
-        var activeIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ludeon.rimworld" };
-        foreach (var id in ReadEnabledPackageIds(options.ModsConfigPath, diagnostics))
+        var enabledPackageIds = ReadEnabledPackageIds(options.ModsConfigPath, diagnostics);
+        var activeIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { CorePackageId, target.PackageId };
+        foreach (var id in enabledPackageIds)
         {
             activeIds.Add(id);
         }
-
-
-        activeIds.Add(target.PackageId);
 
         var changed = true;
         while (changed)
@@ -97,25 +97,18 @@ internal static class ModContextBuilder
             }
         }
 
-        if (!selectedMods.ContainsKey("ludeon.rimworld"))
+        if (!selectedMods.ContainsKey(CorePackageId))
         {
             diagnostics.Add("CTX007", DiagnosticSeverity.Error, "Core mod (packageId ludeon.rimworld) was not found under the game directory.", ValidationStage.Context, file: options.GameDirectory);
             return null;
         }
 
-        var modConfigOrder = ReadEnabledPackageIds(options.ModsConfigPath, diagnostics).ToList();
-
-        var loadOrder = TopologicalSort(selectedMods, modConfigOrder, target.PackageId);
+        var loadOrder = TopologicalSort(selectedMods, enabledPackageIds.ToList(), target.PackageId);
         var orderedMods = loadOrder
-            .Select((packageId, index) =>
-            {
-                var mod = selectedMods[packageId];
-                return mod with { LoadOrder = index };
-            })
+            .Select((packageId, index) => selectedMods[packageId] with { LoadOrder = index })
             .ToList();
 
-        var resolvedTarget = orderedMods.First(static mod => PathsEqual(mod.RootPath, mod.RootPath));
-        resolvedTarget = orderedMods.First(mod => mod.PackageId.Equals(target.PackageId, StringComparison.OrdinalIgnoreCase));
+        var resolvedTarget = orderedMods.First(mod => mod.PackageId.Equals(target.PackageId, StringComparison.OrdinalIgnoreCase));
         return new ModContext(resolvedTarget, orderedMods, activeIds, options.GameDirectory, options.ModsConfigPath);
     }
 
@@ -149,6 +142,26 @@ internal static class ModContextBuilder
         {
             yield return parent;
         }
+
+        foreach (var workshopRoot in EnumerateWorkshopRoots(gameDirectory))
+        {
+            yield return workshopRoot;
+        }
+    }
+
+    private static IEnumerable<string> EnumerateWorkshopRoots(string gameDirectory)
+    {
+        var current = new DirectoryInfo(Path.GetFullPath(gameDirectory));
+        while (current is not null)
+        {
+            if (current.Name.Equals("steamapps", StringComparison.OrdinalIgnoreCase))
+            {
+                yield return Path.Combine(current.FullName, "workshop", "content", WorkshopGameId);
+                yield break;
+            }
+
+            current = current.Parent;
+        }
     }
 
     private static void TryAdd(IDictionary<string, ModInfo> mods, string modDirectory, DiagnosticBag diagnostics)
@@ -169,13 +182,7 @@ internal static class ModContextBuilder
             }
 
             var name = document.Descendants().FirstOrDefault(static element => element.Name.LocalName == "name")?.Value.Trim() ?? packageId;
-            var dependencies = document.Descendants()
-                .Where(static element => element.Parent?.Name.LocalName is "modDependencies" or "dependencies")
-                .Select(static element => element.Value.Trim())
-                .Where(static value => !string.IsNullOrWhiteSpace(value))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
+            var dependencies = ReadDependencies(document);
             var loadFolders = ReadLoadFolders(modDirectory);
             var assemblyPaths = loadFolders
                 .Select(folder => Path.Combine(modDirectory, folder, "Assemblies"))
@@ -190,6 +197,36 @@ internal static class ModContextBuilder
         {
             diagnostics.Add("XML002", DiagnosticSeverity.Error, $"Failed to read About.xml: {ex.Message}", ValidationStage.Context, file: aboutPath);
         }
+    }
+
+    private static IReadOnlyList<string> ReadDependencies(XDocument document)
+    {
+        return document.Descendants()
+            .Where(static element => element.Name.LocalName is "modDependencies" or "dependencies")
+            .Elements()
+            .Select(static element =>
+            {
+                if (element.Name.LocalName == "packageId")
+                {
+                    return element.Value.Trim();
+                }
+
+                var nestedPackageId = element.Elements().FirstOrDefault(static child => child.Name.LocalName == "packageId");
+                if (nestedPackageId is not null)
+                {
+                    return nestedPackageId.Value.Trim();
+                }
+
+                if (!element.HasElements)
+                {
+                    return element.Value.Trim();
+                }
+
+                return string.Empty;
+            })
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private static IReadOnlyList<string> ReadEnabledPackageIds(string modsConfigPath, DiagnosticBag diagnostics)
@@ -260,7 +297,7 @@ internal static class ModContextBuilder
             var next = remaining
                 .Where(static pair => pair.Value.Count == 0)
                 .Select(static pair => pair.Key)
-                .OrderBy(static id => id.Equals("ludeon.rimworld", StringComparison.OrdinalIgnoreCase) ? -1 : 0)
+                .OrderBy(id => id.Equals(CorePackageId, StringComparison.OrdinalIgnoreCase) ? -1 : 0)
                 .ThenBy(id => id.Equals(targetPackageId, StringComparison.OrdinalIgnoreCase) ? 1 : 0)
                 .ThenBy(id => weights.TryGetValue(id, out var weight) ? weight : int.MaxValue)
                 .ThenBy(static id => id, StringComparer.OrdinalIgnoreCase)
@@ -284,8 +321,8 @@ internal static class ModContextBuilder
         }
 
         result.RemoveAll(id => id.Equals(targetPackageId, StringComparison.OrdinalIgnoreCase));
-        result.RemoveAll(static id => id.Equals("ludeon.rimworld", StringComparison.OrdinalIgnoreCase));
-        result.Insert(0, "ludeon.rimworld");
+        result.RemoveAll(id => id.Equals(CorePackageId, StringComparison.OrdinalIgnoreCase));
+        result.Insert(0, CorePackageId);
         result.Add(targetPackageId);
         return result.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
