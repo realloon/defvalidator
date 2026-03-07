@@ -33,21 +33,27 @@ internal static class ModContextBuilder {
             return null;
         }
 
-        var discoveredMods = DiscoverMods(options.GameDirectory, options.ModPath, diagnostics);
-        if (discoveredMods.Count == 0) {
+        var searchRoots = EnumerateSearchRoots(options.GameDirectory, options.ModPath)
+            .Where(Directory.Exists)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (searchRoots.Count == 0) {
             diagnostics.Add("CTX004", DiagnosticSeverity.Error,
-                "No mods could be discovered from --game-dir and target mod path.", ValidationStage.Context);
+                "No mod search roots could be discovered from --game-dir and target mod path.",
+                ValidationStage.Context);
             return null;
         }
 
-        var target = discoveredMods.Values.FirstOrDefault(mod => PathsEqual(mod.RootPath, options.ModPath));
+        var catalog = new ModCatalog(searchRoots);
+        var target = catalog.TryLoad(options.ModPath, diagnostics);
         if (target is null) {
             diagnostics.Add("CTX005", DiagnosticSeverity.Error, $"Target mod was not discoverable: {options.ModPath}",
                 ValidationStage.Context, file: options.ModPath);
             return null;
         }
 
-        if (!discoveredMods.TryGetValue(CorePackageId, out var core)) {
+        var core = catalog.TryLoad(Path.Combine(options.GameDirectory, "Data", "Core"), diagnostics);
+        if (core is null || !string.Equals(core.PackageId, CorePackageId, StringComparison.OrdinalIgnoreCase)) {
             diagnostics.Add("CTX007", DiagnosticSeverity.Error,
                 "Core mod (packageId ludeon.rimworld) was not found under the game directory.", ValidationStage.Context,
                 file: options.GameDirectory);
@@ -58,7 +64,8 @@ internal static class ModContextBuilder {
         var activePackageIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { CorePackageId, target.PackageId };
 
         foreach (var dependencyId in target.Dependencies) {
-            if (!discoveredMods.TryGetValue(dependencyId, out var dependency)) {
+            var dependency = catalog.FindByPackageId(dependencyId);
+            if (dependency is null) {
                 diagnostics.Add("CTX006", DiagnosticSeverity.Warning,
                     $"Required dependency is not available: {dependencyId}", ValidationStage.Context,
                     packageId: target.PackageId);
@@ -73,25 +80,7 @@ internal static class ModContextBuilder {
         }
 
         orderedMods.Add(target);
-        var resolvedTarget = orderedMods[^1];
-        return new ModContext(resolvedTarget, orderedMods, activePackageIds, options.GameDirectory);
-    }
-
-    private static Dictionary<string, ModInfo> DiscoverMods(string gameDirectory, string targetModPath,
-        DiagnosticBag diagnostics) {
-        var result = new Dictionary<string, ModInfo>(StringComparer.OrdinalIgnoreCase);
-        foreach (var root in EnumerateSearchRoots(gameDirectory, targetModPath)) {
-            if (!Directory.Exists(root)) {
-                continue;
-            }
-
-            foreach (var modDirectory in Directory.EnumerateDirectories(root)) {
-                TryAdd(result, modDirectory, diagnostics);
-            }
-        }
-
-        TryAdd(result, targetModPath, diagnostics);
-        return result;
+        return new ModContext(target, orderedMods, activePackageIds, options.GameDirectory);
     }
 
     private static IEnumerable<string> EnumerateSearchRoots(string gameDirectory, string targetModPath) {
@@ -117,35 +106,6 @@ internal static class ModContextBuilder {
             }
 
             current = current.Parent;
-        }
-    }
-
-    private static void TryAdd(IDictionary<string, ModInfo> mods, string modDirectory, DiagnosticBag diagnostics) {
-        var aboutPath = Path.Combine(modDirectory, "About", "About.xml");
-        if (!File.Exists(aboutPath)) {
-            return;
-        }
-
-        try {
-            var document = XDocument.Load(aboutPath, LoadOptions.PreserveWhitespace | LoadOptions.SetLineInfo);
-            var packageId = document.Descendants().FirstOrDefault(static element => element.Name.LocalName == "packageId")?.Value.Trim();
-            if (string.IsNullOrWhiteSpace(packageId)) {
-                packageId = Path.GetFileName(modDirectory);
-            }
-
-            var dependencies = ReadDependencies(document);
-            var loadFolders = ReadLoadFolders(modDirectory);
-            var assemblyPaths = loadFolders
-                .Select(folder => Path.Combine(modDirectory, folder, "Assemblies"))
-                .Where(Directory.Exists)
-                .SelectMany(static path => Directory.EnumerateFiles(path, "*.dll", SearchOption.AllDirectories))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            mods[packageId] = new ModInfo(packageId, modDirectory, dependencies, loadFolders, assemblyPaths);
-        } catch (Exception ex) {
-            diagnostics.Add("XML002", DiagnosticSeverity.Error, $"Failed to read About.xml: {ex.Message}",
-                ValidationStage.Context, file: aboutPath);
         }
     }
 
@@ -196,7 +156,91 @@ internal static class ModContextBuilder {
         }
     }
 
-    private static bool PathsEqual(string left, string right) =>
-        string.Equals(Path.GetFullPath(left), Path.GetFullPath(right),
-            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+    private sealed class ModCatalog(IReadOnlyList<string> searchRoots) {
+        private readonly Dictionary<string, ModInfo> _modsByPackageId = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, ModInfo?> _modsByPath = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _scannedRoots = new(StringComparer.OrdinalIgnoreCase);
+
+        public ModInfo? TryLoad(string modDirectory, DiagnosticBag diagnostics) {
+            var fullPath = Path.GetFullPath(modDirectory);
+            if (_modsByPath.TryGetValue(fullPath, out var cached)) {
+                return cached;
+            }
+
+            var mod = ReadModInfo(fullPath, diagnostics, reportErrors: true);
+            _modsByPath[fullPath] = mod;
+            if (mod is not null) {
+                _modsByPackageId.TryAdd(mod.PackageId, mod);
+            }
+
+            return mod;
+        }
+
+        public ModInfo? FindByPackageId(string packageId) {
+            if (_modsByPackageId.TryGetValue(packageId, out var cached)) {
+                return cached;
+            }
+
+            foreach (var root in searchRoots) {
+                if (!_scannedRoots.Add(root)) {
+                    continue;
+                }
+
+                ScanRoot(root);
+                if (_modsByPackageId.TryGetValue(packageId, out cached)) {
+                    return cached;
+                }
+            }
+
+            return null;
+        }
+
+        private void ScanRoot(string root) {
+            foreach (var modDirectory in Directory.EnumerateDirectories(root)) {
+                var fullPath = Path.GetFullPath(modDirectory);
+                if (_modsByPath.ContainsKey(fullPath)) {
+                    continue;
+                }
+
+                var mod = ReadModInfo(fullPath, diagnostics: null, reportErrors: false);
+                _modsByPath[fullPath] = mod;
+                if (mod is not null) {
+                    _modsByPackageId.TryAdd(mod.PackageId, mod);
+                }
+            }
+        }
+    }
+
+    private static ModInfo? ReadModInfo(string modDirectory, DiagnosticBag? diagnostics, bool reportErrors) {
+        var aboutPath = Path.Combine(modDirectory, "About", "About.xml");
+        if (!File.Exists(aboutPath)) {
+            return null;
+        }
+
+        try {
+            var document = XDocument.Load(aboutPath, LoadOptions.PreserveWhitespace | LoadOptions.SetLineInfo);
+            var packageId = document.Descendants()
+                .FirstOrDefault(static element => element.Name.LocalName == "packageId")
+                ?.Value.Trim();
+            if (string.IsNullOrWhiteSpace(packageId)) {
+                packageId = Path.GetFileName(modDirectory);
+            }
+
+            var assemblyPaths = ReadLoadFolders(modDirectory)
+                .Select(folder => Path.Combine(modDirectory, folder, "Assemblies"))
+                .Where(Directory.Exists)
+                .SelectMany(static path => Directory.EnumerateFiles(path, "*.dll", SearchOption.AllDirectories))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            return new ModInfo(packageId, modDirectory, ReadDependencies(document), ReadLoadFolders(modDirectory), assemblyPaths);
+        } catch (Exception ex) {
+            if (reportErrors) {
+                diagnostics?.Add("XML002", DiagnosticSeverity.Error, $"Failed to read About.xml: {ex.Message}",
+                    ValidationStage.Context, file: aboutPath);
+            }
+
+            return null;
+        }
+    }
 }
