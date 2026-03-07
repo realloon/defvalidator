@@ -1,7 +1,6 @@
 namespace DefValidator.Core;
 
 public enum DiagnosticSeverity {
-    Info,
     Warning,
     Error
 }
@@ -18,8 +17,7 @@ public enum ValidationStage {
 public sealed record ValidationOptions(
     string ModPath,
     string GameDirectory,
-    string ModsConfigPath,
-    bool Strict);
+    string ModsConfigPath);
 
 public sealed record Diagnostic(
     string Code,
@@ -33,20 +31,10 @@ public sealed record Diagnostic(
     string? DefName,
     ValidationStage Stage);
 
-public sealed record ValidationSummary(int ErrorCount, int WarningCount, int InfoCount) { }
+public sealed record ValidationSummary(int ErrorCount, int WarningCount) { }
 
 public sealed record ValidationResult(ValidationSummary Summary, IReadOnlyList<Diagnostic> Diagnostics) {
-    public int GetExitCode(bool strict) {
-        if (Summary.ErrorCount > 0) {
-            return 1;
-        }
-
-        if (strict && Summary.WarningCount > 0) {
-            return 1;
-        }
-
-        return 0;
-    }
+    public int GetExitCode() => Summary.ErrorCount > 0 ? 1 : 0;
 }
 
 internal sealed class DiagnosticBag {
@@ -71,8 +59,7 @@ internal sealed class DiagnosticBag {
     public ValidationResult ToResult() {
         var summary = new ValidationSummary(
             _items.Count(static item => item.Severity == DiagnosticSeverity.Error),
-            _items.Count(static item => item.Severity == DiagnosticSeverity.Warning),
-            _items.Count(static item => item.Severity == DiagnosticSeverity.Info));
+            _items.Count(static item => item.Severity == DiagnosticSeverity.Warning));
 
         return new ValidationResult(summary, _items);
     }

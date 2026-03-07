@@ -4,7 +4,7 @@ using System.Xml.Linq;
 
 namespace DefValidator.Core;
 
-public sealed class DefValidationEngine {
+public static class DefValidationEngine {
     public static Task<ValidationResult> ValidateAsync(ValidationOptions options, CancellationToken cancellationToken) {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -30,8 +30,7 @@ public sealed class DefValidationEngine {
 
         var summary = new ValidationSummary(
             filtered.Count(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error),
-            filtered.Count(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning),
-            filtered.Count(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Info));
+            filtered.Count(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning));
 
         return new ValidationResult(summary, filtered);
     }
@@ -46,11 +45,7 @@ public sealed class DefValidationEngine {
             return true;
         }
 
-        if (!string.IsNullOrWhiteSpace(diagnostic.File) && IsPathUnder(diagnostic.File, targetRoot)) {
-            return true;
-        }
-
-        return false;
+        return !string.IsNullOrWhiteSpace(diagnostic.File) && IsPathUnder(diagnostic.File, targetRoot);
     }
 
     private static bool IsPathUnder(string path, string rootPath) {
@@ -143,21 +138,17 @@ internal static class XmlPipeline {
             var allPresent = mayRequire
                 .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .All(activePackageIds.Contains);
-            if (!allPresent) {
-                return false;
-            }
+
+            if (!allPresent) return false;
         }
 
-        if (!string.IsNullOrWhiteSpace(mayRequireAnyOf)) {
-            var anyPresent = mayRequireAnyOf
-                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Any(activePackageIds.Contains);
-            if (!anyPresent) {
-                return false;
-            }
-        }
+        if (string.IsNullOrWhiteSpace(mayRequireAnyOf)) return true;
 
-        return true;
+        var anyPresent = mayRequireAnyOf
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(activePackageIds.Contains);
+
+        return anyPresent;
     }
 
     internal static XElement CloneElement(XElement element) {
@@ -193,6 +184,9 @@ internal static class InheritanceResolver {
 
         var resolved = new Dictionary<XElement, XElement>();
         var visiting = new HashSet<XElement>();
+
+        var newRoot = new XElement("Defs", nodes.Select(ResolveNode));
+        return new XDocument(newRoot);
 
         XElement ResolveNode(NodeEntry node) {
             if (resolved.TryGetValue(node.Element, out var existing)) {
@@ -233,9 +227,6 @@ internal static class InheritanceResolver {
             resolved[node.Element] = result;
             return result;
         }
-
-        var newRoot = new XElement("Defs", nodes.Select(ResolveNode));
-        return new XDocument(newRoot);
     }
 
     private static XElement Merge(XElement parent, XElement child, DiagnosticBag diagnostics) {
@@ -300,10 +291,10 @@ internal static class InheritanceResolver {
     }
 
     private static void CopySource(XElement destination, XElement sourceElement) {
-        if (sourceElement.Annotation<SourceInfo>() is { } source) {
-            destination.RemoveAnnotations<SourceInfo>();
-            destination.AddAnnotation(source);
-        }
+        if (sourceElement.Annotation<SourceInfo>() is not { } source) return;
+
+        destination.RemoveAnnotations<SourceInfo>();
+        destination.AddAnnotation(source);
     }
 
     private sealed record NodeEntry(XElement Element, int LoadOrder) {
@@ -502,14 +493,15 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
             return null;
         }
 
-        if (!AssemblyCatalog.IsAssignableTo(resolvedType, declaredType)) {
-            AddDiagnostic(element, "TYPE006", DiagnosticSeverity.Error,
-                $"Class '{className}' is not assignable to {declaredType.Name}.", ValidationStage.Type, defType,
-                defName);
-            return null;
+        if (AssemblyCatalog.IsAssignableTo(resolvedType, declaredType)) {
+            return resolvedType;
         }
 
-        return resolvedType;
+        AddDiagnostic(element, "TYPE006", DiagnosticSeverity.Error,
+            $"Class '{className}' is not assignable to {declaredType.Name}.", ValidationStage.Type, defType,
+            defName);
+
+        return null;
     }
 
     private void CollectReference(XElement element, Type targetType, string defType, string? defName) {

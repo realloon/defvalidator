@@ -15,7 +15,7 @@ internal static class CliProgram {
             Console.WriteLine(FormatText(diagnostic));
         }
 
-        return result.GetExitCode(parseResult.Options!.Strict);
+        return result.GetExitCode();
     }
 
     private static string FormatText(Diagnostic diagnostic) {
@@ -42,13 +42,12 @@ internal static class CliParser {
         try {
             if (args.Count == 0) {
                 return Fail(
-                    "Usage: defvalidator <mod-path> [--game-dir <path>] [--mods-config <path>] [--strict]\nMissing --game-dir/--mods-config can be filled from .env via DEFVALIDATOR_GAME_DIR and DEFVALIDATOR_MODS_CONFIG.");
+                    "Usage: defvalidator <mod-path> [--game-dir <path>] [--mods-config <path>]\nMissing --game-dir/--mods-config can be filled from .env via DEFVALIDATOR_GAME_DIR and DEFVALIDATOR_MODS_CONFIG.");
             }
 
             var modPath = args[0];
             string? gameDir = null;
             string? modsConfig = null;
-            var strict = false;
 
             for (var index = 1; index < args.Count; index++) {
                 var arg = args[index];
@@ -59,17 +58,14 @@ internal static class CliParser {
                     case "--mods-config":
                         modsConfig = NextValue(args, ref index, arg);
                         break;
-                    case "--strict":
-                        strict = true;
-                        break;
                     default:
                         return Fail($"Unknown argument: {arg}");
                 }
             }
 
-            var dotEnv = DotEnvFile.Load(Path.Combine(Environment.CurrentDirectory, ".env"));
-            gameDir ??= dotEnv.GetValueOrDefault("DEFVALIDATOR_GAME_DIR");
-            modsConfig ??= dotEnv.GetValueOrDefault("DEFVALIDATOR_MODS_CONFIG");
+            var dotEnvPath = Path.Combine(Environment.CurrentDirectory, ".env");
+            gameDir ??= DotEnvFile.ReadValue(dotEnvPath, "DEFVALIDATOR_GAME_DIR");
+            modsConfig ??= DotEnvFile.ReadValue(dotEnvPath, "DEFVALIDATOR_MODS_CONFIG");
 
             if (string.IsNullOrWhiteSpace(gameDir)) {
                 return Fail("Missing required option --game-dir. You can also set DEFVALIDATOR_GAME_DIR in .env.");
@@ -83,7 +79,7 @@ internal static class CliParser {
             return new CliParseResult(
                 true,
                 null,
-                new ValidationOptions(modPath, gameDir, modsConfig, strict));
+                new ValidationOptions(modPath, gameDir, modsConfig));
         } catch (Exception ex) {
             return Fail(ex.Message);
         }
@@ -102,13 +98,12 @@ internal static class CliParser {
 }
 
 internal static class DotEnvFile {
-    public static IReadOnlyDictionary<string, string> Load(string path) {
+    public static string? ReadValue(string path, string key) {
         if (!File.Exists(path)) {
-            return Empty;
+            return null;
         }
 
-        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var rawLine in File.ReadAllLines(path)) {
+        foreach (var rawLine in File.ReadLines(path)) {
             var line = rawLine.Trim();
             if (line.Length == 0 || line.StartsWith('#')) {
                 continue;
@@ -119,21 +114,19 @@ internal static class DotEnvFile {
                 continue;
             }
 
-            var key = line[..separatorIndex].Trim();
+            if (!line[..separatorIndex].Trim().Equals(key, StringComparison.OrdinalIgnoreCase)) {
+                continue;
+            }
+
             var value = line[(separatorIndex + 1)..].Trim();
             if (value.Length >= 2 && ((value.StartsWith('"') && value.EndsWith('"')) ||
                                       (value.StartsWith("'") && value.EndsWith("'")))) {
-                value = value[1..^1];
+                return value[1..^1];
             }
 
-            if (key.Length > 0) {
-                values[key] = value;
-            }
+            return value;
         }
 
-        return values;
+        return null;
     }
-
-    private static readonly IReadOnlyDictionary<string, string> Empty =
-        new Dictionary<string, string>(0, StringComparer.OrdinalIgnoreCase);
 }

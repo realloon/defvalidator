@@ -6,7 +6,8 @@ await runner.RunAsync();
 internal sealed class TestRunner {
     private readonly List<(string Name, Func<Task> Test)> _tests = [
         (nameof(MissingArgs_Returns2), MissingArgs_Returns2),
-        (nameof(UnknownArgument_Returns2), UnknownArgument_Returns2)
+        (nameof(UnknownArgument_Returns2), UnknownArgument_Returns2),
+        (nameof(Strict_IsNotSupported_Returns2), Strict_IsNotSupported_Returns2)
     ];
 
     public async Task RunAsync() {
@@ -29,13 +30,19 @@ internal sealed class TestRunner {
     private static async Task MissingArgs_Returns2() {
         var result = await RunCliAsync([]);
         Assert.Equal(2, result.ExitCode);
-        Assert.Contains(result.StdErr, "Usage: defvalidator");
+        Assert.Contains(result.StdErr, "Usage: defvalidator <mod-path> [--game-dir <path>] [--mods-config <path>]");
     }
 
     private static async Task UnknownArgument_Returns2() {
         var result = await RunCliAsync(["some-mod", "--wat"]);
         Assert.Equal(2, result.ExitCode);
         Assert.Contains(result.StdErr, "Unknown argument: --wat");
+    }
+
+    private static async Task Strict_IsNotSupported_Returns2() {
+        var result = await RunCliAsync(["some-mod", "--strict"]);
+        Assert.Equal(2, result.ExitCode);
+        Assert.Contains(result.StdErr, "Unknown argument: --strict");
     }
 
     private static async Task<CliResult> RunCliAsync(string[] args) {
