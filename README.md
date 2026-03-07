@@ -117,9 +117,15 @@ Useful commands:
 dotnet build
 
 dotnet test -m:1 --no-restore
+
+bun scripts/clean.js
+
+bun scripts/publish.js
 ```
 
 The `-m:1` avoids MSBuild node issues in some restricted environments.
+The clean script removes repository-local build outputs such as `bin/`, `obj/`, and `TestResults/` under `src/` and `tests/`.
+The publish script builds a single-file executable for the current platform by default.
 
 ## Status
 
