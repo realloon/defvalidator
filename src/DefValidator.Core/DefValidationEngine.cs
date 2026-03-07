@@ -18,7 +18,7 @@ public static class DefValidationEngine {
         var catalog = AssemblyCatalog.Load(context, diagnostics);
         var aggregate = XmlPipeline.BuildAggregate(context, diagnostics);
 
-        var validator = new SemanticValidator(catalog, diagnostics);
+        var validator = new SemanticValidator(catalog, diagnostics, context.TargetMod.PackageId);
         validator.Validate(aggregate);
         return Task.FromResult(FilterDiagnostics(diagnostics.ToResult(), context));
     }
@@ -43,7 +43,7 @@ public static class DefValidationEngine {
         timings.AddRange(xmlProfiler.Export("build_xml"));
         var semanticProfiler = new StepProfiler();
         MeasureStep("semantic_validate", () => {
-            var validator = new SemanticValidator(catalog, diagnostics, semanticProfiler);
+            var validator = new SemanticValidator(catalog, diagnostics, context.TargetMod.PackageId, semanticProfiler);
             validator.Validate(aggregate);
         });
         timings.AddRange(semanticProfiler.Export("semantic_validate"));
@@ -484,7 +484,7 @@ internal static class InheritanceResolver {
         public string? ParentName => Element.Attribute("ParentName")?.Value;
     }
 }
-internal sealed partial class SemanticValidator(AssemblyCatalog catalog, DiagnosticBag diagnostics, StepProfiler? profiler = null) {
+internal sealed partial class SemanticValidator(AssemblyCatalog catalog, DiagnosticBag diagnostics, string targetPackageId, StepProfiler? profiler = null) {
     private static readonly System.Text.RegularExpressions.Regex DefNamePattern = MyRegex();
 
     private readonly List<PendingReference> _references = [];
@@ -540,30 +540,41 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
     }
 
     private void ValidateRootDef(XElement element) {
+        var packageId = element.Annotation<SourceInfo>()?.PackageId;
+        var shouldValidate = string.Equals(packageId, targetPackageId, StringComparison.OrdinalIgnoreCase);
         var typeName = element.Attribute("Class")?.Value ?? element.Name.LocalName;
         var type = MeasureValue("root_find_type", () => catalog.FindType(typeName));
         if (type is null) {
-            AddDiagnostic(element, "TYPE001", DiagnosticSeverity.Error, $"Unknown Def class '{typeName}'.",
-                ValidationStage.Type, element.Name.LocalName, GetDefName(element));
+            if (shouldValidate) {
+                AddDiagnostic(element, "TYPE001", DiagnosticSeverity.Error, $"Unknown Def class '{typeName}'.",
+                    ValidationStage.Type, element.Name.LocalName, GetDefName(element));
+            }
+
             return;
         }
 
         if (!catalog.IsDefType(type)) {
-            AddDiagnostic(element, "TYPE001", DiagnosticSeverity.Error, $"Type '{typeName}' is not a Verse.Def.",
-                ValidationStage.Type, element.Name.LocalName, GetDefName(element));
+            if (shouldValidate) {
+                AddDiagnostic(element, "TYPE001", DiagnosticSeverity.Error, $"Type '{typeName}' is not a Verse.Def.",
+                    ValidationStage.Type, element.Name.LocalName, GetDefName(element));
+            }
+
             return;
         }
 
         var defName = GetDefName(element);
-        if (string.IsNullOrWhiteSpace(defName)) {
-            AddDiagnostic(element, "RULE001", DiagnosticSeverity.Error, "Missing defName.", ValidationStage.Rule,
-                element.Name.LocalName, defName);
-        } else if (!DefNamePattern.IsMatch(defName)) {
-            AddDiagnostic(element, "RULE002", DiagnosticSeverity.Error, $"Invalid defName '{defName}'.",
-                ValidationStage.Rule, element.Name.LocalName, defName);
+        if (shouldValidate) {
+            if (string.IsNullOrWhiteSpace(defName)) {
+                AddDiagnostic(element, "RULE001", DiagnosticSeverity.Error, "Missing defName.", ValidationStage.Rule,
+                    element.Name.LocalName, defName);
+            } else if (!DefNamePattern.IsMatch(defName)) {
+                AddDiagnostic(element, "RULE002", DiagnosticSeverity.Error, $"Invalid defName '{defName}'.",
+                    ValidationStage.Rule, element.Name.LocalName, defName);
+            }
+
+            ValidateObject(element, type, element.Name.LocalName, defName, isRoot: true);
         }
 
-        ValidateObject(element, type, element.Name.LocalName, defName, isRoot: true);
         _defs.Add(new ResolvedDef(element, type, defName));
     }
 
