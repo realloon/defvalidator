@@ -546,6 +546,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
     private void ValidateRootDef(XElement element) {
         var packageId = element.Annotation<SourceInfo>()?.PackageId;
         var shouldValidate = string.Equals(packageId, targetPackageId, StringComparison.OrdinalIgnoreCase);
+        var isAbstract = HasTrueAttribute(element, "Abstract");
         var typeName = element.Attribute("Class")?.Value ?? element.Name.LocalName;
         var type = MeasureValue("root_find_type", () => catalog.FindType(typeName));
         if (type is null) {
@@ -568,18 +569,22 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
 
         var defName = GetDefName(element);
         if (shouldValidate) {
-            if (string.IsNullOrWhiteSpace(defName)) {
-                AddDiagnostic(element, "RULE001", DiagnosticSeverity.Error, "Missing defName.", ValidationStage.Rule,
-                    element.Name.LocalName, defName);
-            } else if (!DefNamePattern.IsMatch(defName)) {
-                AddDiagnostic(element, "RULE002", DiagnosticSeverity.Error, $"Invalid defName '{defName}'.",
-                    ValidationStage.Rule, element.Name.LocalName, defName);
+            if (!isAbstract) {
+                if (string.IsNullOrWhiteSpace(defName)) {
+                    AddDiagnostic(element, "RULE001", DiagnosticSeverity.Error, "Missing defName.", ValidationStage.Rule,
+                        element.Name.LocalName, defName);
+                } else if (!DefNamePattern.IsMatch(defName)) {
+                    AddDiagnostic(element, "RULE002", DiagnosticSeverity.Error, $"Invalid defName '{defName}'.",
+                        ValidationStage.Rule, element.Name.LocalName, defName);
+                }
             }
 
             ValidateObject(element, type, element.Name.LocalName, defName, isRoot: true);
         }
 
-        _defs.Add(new ResolvedDef(element, type, defName));
+        if (!isAbstract) {
+            _defs.Add(new ResolvedDef(element, type, defName));
+        }
     }
 
     private void ValidateObject(XElement element, CatalogType declaredType, string defType, string? defName,
@@ -763,6 +768,11 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
         var source = element.Annotation<SourceInfo>();
         diagnostics.Add(code, severity, message, stage, source?.File, source?.Line, source?.Column, source?.PackageId,
             defType, defName);
+    }
+
+    private static bool HasTrueAttribute(XElement element, string attributeName) {
+        var value = element.Attribute(attributeName)?.Value;
+        return string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? GetDefName(XElement element) => element.Elements()
