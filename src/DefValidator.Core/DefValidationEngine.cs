@@ -36,7 +36,9 @@ public static class DefValidationEngine {
         }
 
         var catalog = MeasureValue("load_metadata", () => AssemblyCatalog.Load(context, diagnostics));
-        var aggregate = MeasureValue("build_xml", () => XmlPipeline.BuildAggregate(context, diagnostics));
+        var xmlProfiler = new StepProfiler();
+        var aggregate = MeasureValue("build_xml", () => XmlPipeline.BuildAggregate(context, diagnostics, xmlProfiler));
+        timings.AddRange(xmlProfiler.Export("build_xml"));
         var semanticProfiler = new StepProfiler();
         MeasureStep("semantic_validate", () => {
             var validator = new SemanticValidator(catalog, diagnostics, semanticProfiler);
@@ -112,35 +114,71 @@ public static class DefValidationEngine {
 internal static class XmlPipeline {
     private const string CorePackageId = "ludeon.rimworld";
 
-    public static XDocument BuildAggregate(ModContext context, DiagnosticBag diagnostics) {
+    public static XDocument BuildAggregate(ModContext context, DiagnosticBag diagnostics, StepProfiler? profiler = null) {
         var aggregate = new XDocument(new XElement("Defs"));
 
         foreach (var mod in context.ModsInLoadOrder) {
             if (string.Equals(mod.PackageId, CorePackageId, StringComparison.OrdinalIgnoreCase)) {
-                AppendAggregate(LoadCoreAggregate(mod, context.ActivePackageIds, diagnostics), aggregate);
+                Measure("load_core_cache", () => AppendAggregate(LoadCoreAggregate(mod, context.ActivePackageIds, diagnostics, profiler), aggregate));
                 continue;
             }
 
-            AppendModAggregate(mod, aggregate, diagnostics, context.ActivePackageIds);
+            Measure("append_mod_aggregate", () => AppendModAggregate(mod, aggregate, diagnostics, context.ActivePackageIds));
         }
 
-        return InheritanceResolver.Resolve(aggregate, diagnostics);
+        return MeasureValue("resolve_inheritance", () => InheritanceResolver.Resolve(aggregate, diagnostics));
+
+        T MeasureValue<T>(string name, Func<T> action) {
+            if (profiler is null) {
+                return action();
+            }
+
+            return profiler.MeasureValue(name, action);
+        }
+
+        void Measure(string name, Action action) {
+            if (profiler is null) {
+                action();
+                return;
+            }
+
+            profiler.Measure(name, action);
+        }
     }
 
     private static XDocument LoadCoreAggregate(
         ModInfo coreMod,
         IReadOnlySet<string> activePackageIds,
-        DiagnosticBag diagnostics) {
+        DiagnosticBag diagnostics,
+        StepProfiler? profiler = null) {
         var cachePath = GetCoreXmlCachePath(coreMod, activePackageIds);
-        if (TryReadCoreCache(cachePath, out var cached)) {
+        var cached = new XDocument(new XElement("Defs"));
+        if (MeasureValue("read_core_cache", () => TryReadCoreCache(cachePath, out cached))) {
             return cached;
         }
 
-        var aggregate = BuildModAggregate(coreMod, diagnostics, activePackageIds);
-        var resolved = InheritanceResolver.Resolve(aggregate, diagnostics);
-        var sanitized = SanitizeCachedAggregate(resolved);
-        TryWriteCoreCache(cachePath, sanitized);
+        var aggregate = MeasureValue("build_core_aggregate", () => BuildModAggregate(coreMod, diagnostics, activePackageIds));
+        var resolved = MeasureValue("resolve_core_inheritance", () => InheritanceResolver.Resolve(aggregate, diagnostics));
+        var sanitized = MeasureValue("sanitize_core_cache", () => SanitizeCachedAggregate(resolved));
+        Measure("write_core_cache", () => TryWriteCoreCache(cachePath, sanitized));
         return sanitized;
+
+        T MeasureValue<T>(string name, Func<T> action) {
+            if (profiler is null) {
+                return action();
+            }
+
+            return profiler.MeasureValue(name, action);
+        }
+
+        void Measure(string name, Action action) {
+            if (profiler is null) {
+                action();
+                return;
+            }
+
+            profiler.Measure(name, action);
+        }
     }
 
     private static XDocument BuildModAggregate(
