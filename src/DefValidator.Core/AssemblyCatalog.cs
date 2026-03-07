@@ -1,5 +1,5 @@
+using MemoryPack;
 using System.Reflection;
-using System.Text.Json;
 
 namespace DefValidator.Core;
 
@@ -401,25 +401,22 @@ internal sealed class AssemblyCatalog {
     }
 
     private static string GetCoreCachePath(IReadOnlyList<string> gameAssemblyPaths) {
-        return CacheFiles.BuildPath("core-types", "json", gameAssemblyPaths
+        return CacheFiles.BuildPath("core-types", "mpk", gameAssemblyPaths
             .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)
             .Select(static path => {
                 var info = new FileInfo(path);
                 return $"{Path.GetFullPath(path)}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
             }));
     }
+
     private static bool TryReadCache(string cachePath, out IReadOnlyList<CatalogType> types) {
         try {
-            if (!File.Exists(cachePath)) {
+            if (!CacheFiles.TryReadMemoryPack<AssemblyCatalogCache>(cachePath, out var cache)) {
                 types = [];
                 return false;
             }
 
-            if (!CacheFiles.TryReadJson<AssemblyCatalogCache>(cachePath, out var cache)) {
-                types = [];
-                return false;
-            }
-            if (cache?.Version != 1 || cache.Types is null) {
+            if (cache is null || cache.Version != 1 || cache.Types is null) {
                 types = [];
                 return false;
             }
@@ -435,44 +432,47 @@ internal sealed class AssemblyCatalog {
     private static void TryWriteCache(string cachePath, IReadOnlyList<CatalogType> types) {
         try {
             var cache = new AssemblyCatalogCache(1, types.Select(static type => CachedType.From(type)).ToList());
-            CacheFiles.TryWriteJson(cachePath, cache);
+            CacheFiles.TryWriteMemoryPack(cachePath, cache);
         } catch {
         }
     }
+}
 
-    private sealed record AssemblyCatalogCache(int Version, List<CachedType> Types);
+[MemoryPackable]
+internal sealed partial record AssemblyCatalogCache(int Version, List<CachedType> Types);
 
-    private sealed record CachedType(
-        string Name,
-        string? FullName,
-        string? BaseTypeName,
-        string[] InterfaceTypeNames,
-        bool IsAbstract,
-        bool IsInterface,
-        bool IsEnum,
-        bool IsPrimitive,
-        string[] EnumNames,
-        Dictionary<string, CachedMember> DeclaredMembers) {
-        public CatalogType ToCatalogType() {
-            return new CatalogType(Name, FullName, BaseTypeName, InterfaceTypeNames, IsAbstract, IsInterface, IsEnum,
-                IsPrimitive, EnumNames,
-                DeclaredMembers.ToDictionary(static pair => pair.Key, static pair => pair.Value.ToCatalogMember(),
-                    StringComparer.Ordinal));
-        }
-
-        public static CachedType From(CatalogType type) {
-            return new CachedType(type.Name, type.FullName, type.BaseTypeName, type.InterfaceTypeNames.ToArray(),
-                type.IsAbstract, type.IsInterface, type.IsEnum, type.IsPrimitive, type.EnumNames.ToArray(),
-                type.DeclaredMembers.ToDictionary(static pair => pair.Key, static pair => CachedMember.From(pair.Value),
-                    StringComparer.Ordinal));
-        }
+[MemoryPackable]
+internal sealed partial record CachedType(
+    string Name,
+    string? FullName,
+    string? BaseTypeName,
+    string[] InterfaceTypeNames,
+    bool IsAbstract,
+    bool IsInterface,
+    bool IsEnum,
+    bool IsPrimitive,
+    string[] EnumNames,
+    Dictionary<string, CachedMember> DeclaredMembers) {
+    public CatalogType ToCatalogType() {
+        return new CatalogType(Name, FullName, BaseTypeName, InterfaceTypeNames, IsAbstract, IsInterface, IsEnum,
+            IsPrimitive, EnumNames,
+            DeclaredMembers.ToDictionary(static pair => pair.Key, static pair => pair.Value.ToCatalogMember(),
+                StringComparer.Ordinal));
     }
 
-    private sealed record CachedMember(string Name, string TypeName, string? ListItemTypeName) {
-        public CatalogMember ToCatalogMember() => new(Name, TypeName, ListItemTypeName);
-
-        public static CachedMember From(CatalogMember member) => new(member.Name, member.TypeName, member.ListItemTypeName);
+    public static CachedType From(CatalogType type) {
+        return new CachedType(type.Name, type.FullName, type.BaseTypeName, type.InterfaceTypeNames.ToArray(),
+            type.IsAbstract, type.IsInterface, type.IsEnum, type.IsPrimitive, type.EnumNames.ToArray(),
+            type.DeclaredMembers.ToDictionary(static pair => pair.Key, static pair => CachedMember.From(pair.Value),
+                StringComparer.Ordinal));
     }
+}
+
+[MemoryPackable]
+internal sealed partial record CachedMember(string Name, string TypeName, string? ListItemTypeName) {
+    public CatalogMember ToCatalogMember() => new(Name, TypeName, ListItemTypeName);
+
+    public static CachedMember From(CatalogMember member) => new(member.Name, member.TypeName, member.ListItemTypeName);
 }
 
 internal sealed record CatalogType(

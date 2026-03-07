@@ -6,9 +6,21 @@ using System.Xml.Linq;
 namespace DefValidator.Core;
 
 public static class DefValidationEngine {
-    public static async Task<ValidationResult> ValidateAsync(ValidationOptions options, CancellationToken cancellationToken) {
-        var run = await ValidateWithProfileAsync(options, cancellationToken);
-        return run.Result;
+    public static Task<ValidationResult> ValidateAsync(ValidationOptions options, CancellationToken cancellationToken) {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var diagnostics = new DiagnosticBag();
+        var context = ModContextBuilder.Build(options, diagnostics);
+        if (context is null) {
+            return Task.FromResult(diagnostics.ToResult());
+        }
+
+        var catalog = AssemblyCatalog.Load(context, diagnostics);
+        var aggregate = XmlPipeline.BuildAggregate(context, diagnostics);
+
+        var validator = new SemanticValidator(catalog, diagnostics);
+        validator.Validate(aggregate);
+        return Task.FromResult(FilterDiagnostics(diagnostics.ToResult(), context));
     }
 
     public static Task<ValidationRun> ValidateWithProfileAsync(ValidationOptions options, CancellationToken cancellationToken) {
@@ -25,10 +37,12 @@ public static class DefValidationEngine {
 
         var catalog = MeasureValue("load_metadata", () => AssemblyCatalog.Load(context, diagnostics));
         var aggregate = MeasureValue("build_xml", () => XmlPipeline.BuildAggregate(context, diagnostics));
+        var semanticProfiler = new StepProfiler();
         MeasureStep("semantic_validate", () => {
-            var validator = new SemanticValidator(catalog, diagnostics);
+            var validator = new SemanticValidator(catalog, diagnostics, semanticProfiler);
             validator.Validate(aggregate);
         });
+        timings.AddRange(semanticProfiler.Export("semantic_validate"));
 
         var result = MeasureValue("filter_diagnostics", () => FilterDiagnostics(diagnostics.ToResult(), context));
         return Task.FromResult(Finish(result));
@@ -428,46 +442,64 @@ internal static class InheritanceResolver {
         public string? ParentName => Element.Attribute("ParentName")?.Value;
     }
 }
-internal sealed partial class SemanticValidator(AssemblyCatalog catalog, DiagnosticBag diagnostics) {
+internal sealed partial class SemanticValidator(AssemblyCatalog catalog, DiagnosticBag diagnostics, StepProfiler? profiler = null) {
     private static readonly System.Text.RegularExpressions.Regex DefNamePattern = MyRegex();
 
     private readonly List<PendingReference> _references = [];
     private readonly List<ResolvedDef> _defs = [];
 
     public void Validate(XDocument aggregate) {
-        foreach (var element in aggregate.Root?.Elements() ?? []) {
-            ValidateRootDef(element);
-        }
+        Measure("validate_root_defs", () => {
+            foreach (var element in aggregate.Root?.Elements() ?? []) {
+                ValidateRootDef(element);
+            }
+        });
 
-        var duplicates = _defs
+        Measure("duplicate_defnames", () => {
+            var duplicates = _defs
+                .Where(static def => !string.IsNullOrWhiteSpace(def.DefName))
+                .GroupBy(static def => $"{def.Type.DisplayName}::{def.DefName}", StringComparer.Ordinal)
+                .Where(static group => group.Count() > 1);
+
+            foreach (var duplicate in duplicates) {
+                foreach (var def in duplicate) {
+                    AddDiagnostic(def.Element, "XREF001", DiagnosticSeverity.Error,
+                        $"Duplicate defName '{def.DefName}' for type {def.Type.Name}.", ValidationStage.Xref, def.Type.Name,
+                        def.DefName);
+                }
+            }
+        });
+
+        Measure("resolve_references", () => {
+            var defsByName = MeasureValue("index_defs_by_name", BuildDefsByNameIndex);
+            foreach (var reference in _references) {
+                var matched = MeasureValue("resolve_reference_match", () => {
+                    if (!defsByName.TryGetValue(reference.Value, out var candidates)) {
+                        return false;
+                    }
+
+                    return candidates.Any(def => catalog.IsAssignableTo(def.Type, reference.TargetType));
+                });
+                if (!matched) {
+                    diagnostics.Add("XREF002", DiagnosticSeverity.Error,
+                        $"Could not resolve Def reference '{reference.Value}' for expected type {reference.TargetType.Name}.",
+                        ValidationStage.Xref, reference.Source.File, reference.Source.Line, reference.Source.Column,
+                        reference.Source.PackageId, reference.OwnerDefType, reference.OwnerDefName);
+                }
+            }
+        });
+    }
+
+    private Dictionary<string, List<ResolvedDef>> BuildDefsByNameIndex() {
+        return _defs
             .Where(static def => !string.IsNullOrWhiteSpace(def.DefName))
-            .GroupBy(static def => $"{def.Type.DisplayName}::{def.DefName}", StringComparer.Ordinal)
-            .Where(static group => group.Count() > 1);
-
-        foreach (var duplicate in duplicates) {
-            foreach (var def in duplicate) {
-                AddDiagnostic(def.Element, "XREF001", DiagnosticSeverity.Error,
-                    $"Duplicate defName '{def.DefName}' for type {def.Type.Name}.", ValidationStage.Xref, def.Type.Name,
-                    def.DefName);
-            }
-        }
-
-        foreach (var reference in _references) {
-            var matched = _defs.Any(def =>
-                catalog.IsAssignableTo(def.Type, reference.TargetType) &&
-                string.Equals(def.DefName, reference.Value, StringComparison.Ordinal));
-            if (!matched) {
-                diagnostics.Add("XREF002", DiagnosticSeverity.Error,
-                    $"Could not resolve Def reference '{reference.Value}' for expected type {reference.TargetType.Name}.",
-                    ValidationStage.Xref, reference.Source.File, reference.Source.Line, reference.Source.Column,
-                    reference.Source.PackageId, reference.OwnerDefType, reference.OwnerDefName);
-            }
-        }
+            .GroupBy(static def => def.DefName!, StringComparer.Ordinal)
+            .ToDictionary(static group => group.Key, static group => group.ToList(), StringComparer.Ordinal);
     }
 
     private void ValidateRootDef(XElement element) {
         var typeName = element.Attribute("Class")?.Value ?? element.Name.LocalName;
-        var type = catalog.FindType(typeName);
+        var type = MeasureValue("root_find_type", () => catalog.FindType(typeName));
         if (type is null) {
             AddDiagnostic(element, "TYPE001", DiagnosticSeverity.Error, $"Unknown Def class '{typeName}'.",
                 ValidationStage.Type, element.Name.LocalName, GetDefName(element));
@@ -495,8 +527,9 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
 
     private void ValidateObject(XElement element, CatalogType declaredType, string defType, string? defName,
         bool isRoot = false) {
+        Measure("validate_object", () => {
         var actualType = ResolveClassOverride(element, declaredType, defType, defName) ?? declaredType;
-        var members = catalog.GetMembers(actualType);
+        var members = MeasureValue("get_members", () => catalog.GetMembers(actualType));
         var duplicates = element.Elements()
             .Where(static child => child.Name.LocalName != "li")
             .GroupBy(static child => child.Name.LocalName, StringComparer.Ordinal)
@@ -525,9 +558,11 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
 
             ValidateValue(child, member, defType, defName);
         }
+        });
     }
 
     private void ValidateValue(XElement element, CatalogMember member, string defType, string? defName) {
+        Measure("validate_value", () => {
         if (catalog.IsListType(member)) {
             var itemType = catalog.GetListItemType(member);
             foreach (var item in element.Elements()) {
@@ -547,7 +582,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
             return;
         }
 
-        var memberType = catalog.GetMemberType(member);
+        var memberType = MeasureValue("get_member_type", () => catalog.GetMemberType(member));
         if (catalog.IsDefType(memberType)) {
             CollectReference(element, memberType, defType, defName);
             return;
@@ -565,9 +600,11 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
         }
 
         ValidateObject(element, memberType, defType, defName);
+        });
     }
 
     private void ValidateScalar(XElement element, CatalogType type, string defType, string? defName) {
+        Measure("validate_scalar", () => {
         var value = (element.Value).Trim();
         var ok = type.IsEnum
             ? type.EnumNames.Any(name => string.Equals(name, value, StringComparison.Ordinal))
@@ -577,6 +614,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
             AddDiagnostic(element, "TYPE005", DiagnosticSeverity.Error,
                 $"Value '{value}' is not assignable to {type.Name}.", ValidationStage.Type, defType, defName);
         }
+        });
     }
 
     private bool IsScalarValueAssignable(CatalogType type, string value) {
@@ -604,6 +642,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
     }
 
     private CatalogType? ResolveClassOverride(XElement element, CatalogType declaredType, string defType, string? defName) {
+        return MeasureValue("resolve_class_override", () => {
         var className = element.Attribute("Class")?.Value;
         if (string.IsNullOrWhiteSpace(className)) {
             return null;
@@ -625,9 +664,11 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
             defName);
 
         return null;
+        });
     }
 
     private void CollectReference(XElement element, CatalogType targetType, string defType, string? defName) {
+        Measure("collect_reference", () => {
         var value = (element.Value).Trim();
         if (string.IsNullOrWhiteSpace(value)) {
             AddDiagnostic(element, "XREF003", DiagnosticSeverity.Error,
@@ -637,6 +678,24 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
 
         _references.Add(new PendingReference(element.Annotation<SourceInfo>() ?? new SourceInfo(null, null, null, null),
             targetType, value, defType, defName));
+        });
+    }
+
+    private T MeasureValue<T>(string name, Func<T> action) {
+        if (profiler is null) {
+            return action();
+        }
+
+        return profiler.MeasureValue(name, action);
+    }
+
+    private void Measure(string name, Action action) {
+        if (profiler is null) {
+            action();
+            return;
+        }
+
+        profiler.Measure(name, action);
     }
 
     private void AddDiagnostic(XElement element, string code, DiagnosticSeverity severity, string message,
@@ -661,6 +720,46 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
     [System.Text.RegularExpressions.GeneratedRegex("^[A-Za-z0-9_.-]+$",
         System.Text.RegularExpressions.RegexOptions.Compiled)]
     private static partial System.Text.RegularExpressions.Regex MyRegex();
+}
+
+internal sealed class StepProfiler {
+    private readonly Dictionary<string, (long Ticks, int Count)> _stats = new(StringComparer.Ordinal);
+
+    public T MeasureValue<T>(string name, Func<T> action) {
+        var stopwatch = Stopwatch.StartNew();
+        try {
+            return action();
+        } finally {
+            stopwatch.Stop();
+            Add(name, stopwatch.ElapsedTicks);
+        }
+    }
+
+    public void Measure(string name, Action action) {
+        var stopwatch = Stopwatch.StartNew();
+        try {
+            action();
+        } finally {
+            stopwatch.Stop();
+            Add(name, stopwatch.ElapsedTicks);
+        }
+    }
+
+    public IReadOnlyList<ValidationTiming> Export(string prefix) {
+        return _stats
+            .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+.Select(pair => new ValidationTiming($"{prefix}.{pair.Key}", Stopwatch.GetElapsedTime(0, pair.Value.Ticks), pair.Value.Count))
+            .ToList();
+    }
+
+    private void Add(string name, long ticks) {
+        if (_stats.TryGetValue(name, out var existing)) {
+            _stats[name] = (existing.Ticks + ticks, existing.Count + 1);
+            return;
+        }
+
+        _stats[name] = (ticks, 1);
+    }
 }
 
 internal sealed record SourceInfo(string? File, int? Line, int? Column, string? PackageId);

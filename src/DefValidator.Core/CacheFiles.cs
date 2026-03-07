@@ -1,6 +1,6 @@
+using MemoryPack;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using System.Xml.Linq;
 
 namespace DefValidator.Core;
@@ -17,14 +17,14 @@ internal static class CacheFiles {
         return Path.Combine(GetCacheDirectory(), $"{prefix}-{hash}.{extension}");
     }
 
-    public static bool TryReadJson<T>(string path, out T? value) {
+    public static bool TryReadMemoryPack<T>(string path, out T? value) {
         try {
             if (!File.Exists(path)) {
                 value = default;
                 return false;
             }
 
-            value = JsonSerializer.Deserialize<T>(File.ReadAllText(path));
+            value = MemoryPackSerializer.Deserialize<T>(File.ReadAllBytes(path));
             return value is not null;
         } catch {
             value = default;
@@ -32,10 +32,10 @@ internal static class CacheFiles {
         }
     }
 
-    public static void TryWriteJson<T>(string path, T value) {
+    public static void TryWriteMemoryPack<T>(string path, T value) {
         try {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, JsonSerializer.Serialize(value));
+            File.WriteAllBytes(path, MemoryPackSerializer.Serialize(value));
         } catch {
         }
     }

@@ -49,7 +49,8 @@ internal static class ProfileOutput {
 
     public static async Task WriteAsync(IReadOnlyList<ValidationTiming> timings) {
         foreach (var timing in timings) {
-            await Console.Error.WriteLineAsync($"profile: {timing.Name}={timing.Elapsed.TotalMilliseconds:F1}ms");
+            var suffix = timing.Count > 1 ? $" count={timing.Count}" : string.Empty;
+            await Console.Error.WriteLineAsync($"profile: {timing.Name}={timing.Elapsed.TotalMilliseconds:F1}ms{suffix}");
         }
     }
 }
