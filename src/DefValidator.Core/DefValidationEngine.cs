@@ -27,8 +27,54 @@ public sealed class DefValidationEngine
 
         var validator = new SemanticValidator(catalog, diagnostics);
         validator.Validate(aggregate);
-        return Task.FromResult(diagnostics.ToResult());
+        return Task.FromResult(FilterDiagnostics(diagnostics.ToResult(), context));
     }
+
+    private static ValidationResult FilterDiagnostics(ValidationResult result, ModContext context)
+    {
+        var targetRoot = Path.GetFullPath(context.TargetMod.RootPath);
+        var filtered = result.Diagnostics
+            .Where(diagnostic => IsRelevantToTarget(diagnostic, context.TargetMod.PackageId, targetRoot))
+            .ToList();
+
+        var summary = new ValidationSummary(
+            filtered.Count(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error),
+            filtered.Count(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning),
+            filtered.Count(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Info));
+
+        return new ValidationResult(summary, filtered);
+    }
+
+    private static bool IsRelevantToTarget(Diagnostic diagnostic, string targetPackageId, string targetRoot)
+    {
+        if (BlockingContextCodes.Contains(diagnostic.Code))
+        {
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(diagnostic.PackageId) && string.Equals(diagnostic.PackageId, targetPackageId, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(diagnostic.File) && IsPathUnder(diagnostic.File, targetRoot))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsPathUnder(string path, string rootPath)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var normalizedRoot = Path.TrimEndingDirectorySeparator(rootPath) + Path.DirectorySeparatorChar;
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return fullPath.StartsWith(normalizedRoot, comparison) || string.Equals(fullPath, rootPath, comparison);
+    }
+
+    private static readonly HashSet<string> BlockingContextCodes = ["CTX001", "CTX002", "CTX003", "CTX004", "CTX005", "CTX006", "CTX007"];
+
 }
 
 internal static class XmlPipeline

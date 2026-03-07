@@ -20,6 +20,7 @@ internal sealed class TestRunner
             (nameof(UnknownClass_ProducesType001), UnknownClass_ProducesType001),
             (nameof(FieldTypeMismatch_ProducesType005), FieldTypeMismatch_ProducesType005),
             (nameof(CustomAssemblyAndCrossModReference_Succeeds), CustomAssemblyAndCrossModReference_Succeeds),
+            (nameof(FiltersOutExternalContextNoise), FiltersOutExternalContextNoise),
             (nameof(DotEnv_FillsGameDirAndModsConfig), DotEnv_FillsGameDirAndModsConfig)
         ];
     }
@@ -136,6 +137,18 @@ internal sealed class TestRunner
     }
 
 
+    private async Task FiltersOutExternalContextNoise()
+    {
+        using var fixture = TestFixture.Create();
+        fixture.WriteCoreDef("Noise.xml", "<Defs><ThingDef ParentName=\"MissingCoreParent\"><defName>CoreNoise</defName><statBase>1</statBase></ThingDef></Defs>");
+        fixture.WriteTargetDef("Defs.xml", "<Defs><ThingDef><defName>TargetOk</defName><statBase>1</statBase></ThingDef></Defs>");
+
+        var cli = await RunCliAsync(fixture.CreateCliArgs());
+        Assert.Equal(0, cli.ExitCode);
+        Assert.DoesNotContain(fixture.Normalize(cli.StdOut), "CoreNoise");
+        Assert.DoesNotContain(fixture.Normalize(cli.StdOut), "INHERIT001");
+    }
+
     private async Task DotEnv_FillsGameDirAndModsConfig()
     {
         using var fixture = TestFixture.Create();
@@ -246,6 +259,12 @@ internal sealed class TestFixture : IDisposable
         File.WriteAllText(fullPath, xml);
     }
 
+    public void WriteCoreDef(string fileName, string xml)
+    {
+        var fullPath = Path.Combine(_gameDir, "Data", "Core", "Defs", fileName);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, xml);
+    }
 
     public void WriteDotEnv(string content)
     {
@@ -334,6 +353,14 @@ internal static class Assert
         if (!value.Contains(expectedSubstring, StringComparison.Ordinal))
         {
             throw new InvalidOperationException($"Expected substring '{expectedSubstring}' in: {value}");
+        }
+    }
+
+    public static void DoesNotContain(string value, string unexpectedSubstring)
+    {
+        if (value.Contains(unexpectedSubstring, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Did not expect substring '{unexpectedSubstring}' in: {value}");
         }
     }
 
