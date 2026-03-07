@@ -29,8 +29,7 @@ public static class DefValidationEngine {
             .ToList();
 
         var summary = new ValidationSummary(
-            filtered.Count(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error),
-            filtered.Count(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning));
+            filtered.Count(static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
 
         return new ValidationResult(summary, filtered);
     }

@@ -7,7 +7,8 @@ internal sealed class TestRunner {
     private readonly List<(string Name, Func<Task> Test)> _tests = [
         (nameof(MissingArgs_Returns2), MissingArgs_Returns2),
         (nameof(UnknownArgument_Returns2), UnknownArgument_Returns2),
-        (nameof(Strict_IsNotSupported_Returns2), Strict_IsNotSupported_Returns2)
+        (nameof(MissingGameDir_Returns2), MissingGameDir_Returns2),
+        (nameof(ModsConfig_IsNotSupported_Returns2), ModsConfig_IsNotSupported_Returns2)
     ];
 
     public async Task RunAsync() {
@@ -30,7 +31,7 @@ internal sealed class TestRunner {
     private static async Task MissingArgs_Returns2() {
         var result = await RunCliAsync([]);
         Assert.Equal(2, result.ExitCode);
-        Assert.Contains(result.StdErr, "Usage: defvalidator <mod-path> [--game-dir <path>] [--mods-config <path>]");
+        Assert.Contains(result.StdErr, "Usage: defvalidator <mod-path> [--game-dir <path>]");
     }
 
     private static async Task UnknownArgument_Returns2() {
@@ -39,10 +40,16 @@ internal sealed class TestRunner {
         Assert.Contains(result.StdErr, "Unknown argument: --wat");
     }
 
-    private static async Task Strict_IsNotSupported_Returns2() {
-        var result = await RunCliAsync(["some-mod", "--strict"]);
+    private static async Task MissingGameDir_Returns2() {
+        var result = await RunCliAsync(["some-mod"]);
         Assert.Equal(2, result.ExitCode);
-        Assert.Contains(result.StdErr, "Unknown argument: --strict");
+        Assert.Contains(result.StdErr, "Missing required option --game-dir");
+    }
+
+    private static async Task ModsConfig_IsNotSupported_Returns2() {
+        var result = await RunCliAsync(["some-mod", "--mods-config", "ModsConfig.xml"]);
+        Assert.Equal(2, result.ExitCode);
+        Assert.Contains(result.StdErr, "Unknown argument: --mods-config");
     }
 
     private static async Task<CliResult> RunCliAsync(string[] args) {
@@ -61,10 +68,10 @@ internal sealed class TestRunner {
 
         using var process = Process.Start(startInfo) ??
                             throw new InvalidOperationException("Failed to start CLI process.");
-        var stdOut = await process.StandardOutput.ReadToEndAsync();
+        _ = await process.StandardOutput.ReadToEndAsync();
         var stdErr = await process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
-        return new CliResult(process.ExitCode, stdOut, stdErr);
+        return new CliResult(process.ExitCode, stdErr);
     }
 
     private static string FindRepoRoot() {
@@ -80,7 +87,7 @@ internal sealed class TestRunner {
         throw new InvalidOperationException("Could not locate repository root.");
     }
 
-    private sealed record CliResult(int ExitCode, string StdOut, string StdErr);
+    private sealed record CliResult(int ExitCode, string StdErr);
 }
 
 internal static class Assert {

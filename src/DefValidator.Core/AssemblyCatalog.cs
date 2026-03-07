@@ -5,10 +5,8 @@ namespace DefValidator.Core;
 internal sealed class AssemblyCatalog {
     private readonly Dictionary<string, Type> _typesByName = new(StringComparer.Ordinal);
     private readonly Dictionary<Type, IReadOnlyDictionary<string, MemberInfo>> _memberCache = new();
-    private readonly MetadataLoadContext? _loadContext;
 
-    private AssemblyCatalog(MetadataLoadContext? loadContext, Type? defBaseType, Type? compPropertiesBaseType) {
-        _loadContext = loadContext;
+    private AssemblyCatalog(Type? defBaseType, Type? compPropertiesBaseType) {
         DefBaseType = defBaseType;
         CompPropertiesBaseType = compPropertiesBaseType;
     }
@@ -51,7 +49,6 @@ internal sealed class AssemblyCatalog {
 
         var allTypes = assemblies.SelectMany(SafeGetTypes).ToList();
         var catalog = new AssemblyCatalog(
-            loadContext,
             allTypes.FirstOrDefault(static type => type.FullName == "Verse.Def"),
             allTypes.FirstOrDefault(static type => type.FullName == "Verse.CompProperties"));
 

@@ -16,8 +16,7 @@ public enum ValidationStage {
 
 public sealed record ValidationOptions(
     string ModPath,
-    string GameDirectory,
-    string ModsConfigPath);
+    string GameDirectory);
 
 public sealed record Diagnostic(
     string Code,
@@ -31,7 +30,7 @@ public sealed record Diagnostic(
     string? DefName,
     ValidationStage Stage);
 
-public sealed record ValidationSummary(int ErrorCount, int WarningCount) { }
+public sealed record ValidationSummary(int ErrorCount) { }
 
 public sealed record ValidationResult(ValidationSummary Summary, IReadOnlyList<Diagnostic> Diagnostics) {
     public int GetExitCode() => Summary.ErrorCount > 0 ? 1 : 0;
@@ -54,12 +53,9 @@ internal sealed class DiagnosticBag {
         _items.Add(new Diagnostic(code, severity, message, file, line, column, packageId, defType, defName, stage));
     }
 
-    public IReadOnlyList<Diagnostic> Items => _items;
-
     public ValidationResult ToResult() {
         var summary = new ValidationSummary(
-            _items.Count(static item => item.Severity == DiagnosticSeverity.Error),
-            _items.Count(static item => item.Severity == DiagnosticSeverity.Warning));
+            _items.Count(static item => item.Severity == DiagnosticSeverity.Error));
 
         return new ValidationResult(summary, _items);
     }

@@ -42,21 +42,17 @@ internal static class CliParser {
         try {
             if (args.Count == 0) {
                 return Fail(
-                    "Usage: defvalidator <mod-path> [--game-dir <path>] [--mods-config <path>]\nMissing --game-dir/--mods-config can be filled from .env via DEFVALIDATOR_GAME_DIR and DEFVALIDATOR_MODS_CONFIG.");
+                    "Usage: defvalidator <mod-path> [--game-dir <path>]\nMissing --game-dir can be filled from .env via DEFVALIDATOR_GAME_DIR.");
             }
 
             var modPath = args[0];
             string? gameDir = null;
-            string? modsConfig = null;
 
             for (var index = 1; index < args.Count; index++) {
                 var arg = args[index];
                 switch (arg) {
                     case "--game-dir":
                         gameDir = NextValue(args, ref index, arg);
-                        break;
-                    case "--mods-config":
-                        modsConfig = NextValue(args, ref index, arg);
                         break;
                     default:
                         return Fail($"Unknown argument: {arg}");
@@ -65,21 +61,15 @@ internal static class CliParser {
 
             var dotEnvPath = Path.Combine(Environment.CurrentDirectory, ".env");
             gameDir ??= DotEnvFile.ReadValue(dotEnvPath, "DEFVALIDATOR_GAME_DIR");
-            modsConfig ??= DotEnvFile.ReadValue(dotEnvPath, "DEFVALIDATOR_MODS_CONFIG");
 
             if (string.IsNullOrWhiteSpace(gameDir)) {
                 return Fail("Missing required option --game-dir. You can also set DEFVALIDATOR_GAME_DIR in .env.");
             }
 
-            if (string.IsNullOrWhiteSpace(modsConfig)) {
-                return Fail(
-                    "Missing required option --mods-config. You can also set DEFVALIDATOR_MODS_CONFIG in .env.");
-            }
-
             return new CliParseResult(
                 true,
                 null,
-                new ValidationOptions(modPath, gameDir, modsConfig));
+                new ValidationOptions(modPath, gameDir));
         } catch (Exception ex) {
             return Fail(ex.Message);
         }
