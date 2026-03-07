@@ -378,18 +378,18 @@ internal static class InheritanceResolver {
                 var source = node.Element.Annotation<SourceInfo>();
                 diagnostics.Add("INHERIT002", DiagnosticSeverity.Error, "Cyclic inheritance hierarchy detected.",
                     ValidationStage.Inheritance, source?.File, source?.Line, source?.Column, source?.PackageId);
-                return XmlPipeline.CloneElement(node.Element);
+                return node.Element;
             }
 
             XElement result;
             if (string.IsNullOrWhiteSpace(node.ParentName)) {
-                result = XmlPipeline.CloneElement(node.Element);
+                result = node.Element;
             } else if (!named.TryGetValue(node.ParentName, out var candidates)) {
                 var source = node.Element.Annotation<SourceInfo>();
                 diagnostics.Add("INHERIT001", DiagnosticSeverity.Error,
                     $"Could not find ParentName '{node.ParentName}'.", ValidationStage.Inheritance, source?.File,
                     source?.Line, source?.Column, source?.PackageId, node.Element.Name.LocalName);
-                result = XmlPipeline.CloneElement(node.Element);
+                result = node.Element;
             } else {
                 var parent = candidates.Where(candidate => candidate.LoadOrder <= node.LoadOrder)
                     .OrderByDescending(static candidate => candidate.LoadOrder).FirstOrDefault();
@@ -423,7 +423,7 @@ internal static class InheritanceResolver {
             current.ReplaceAttributes(child.Attributes()
                 .Where(static attribute => attribute.Name.LocalName != "Inherit")
                 .Select(static attribute => new XAttribute(attribute)));
-            current.ReplaceNodes(child.Nodes().Select(XmlPipeline.CloneNode).Where(static node => node is not null));
+            current.ReplaceNodes(child.Nodes().ToList());
             CopySource(current, child);
             return;
         }
@@ -443,13 +443,13 @@ internal static class InheritanceResolver {
 
         foreach (var childElement in elementChildren) {
             if (childElement.Name.LocalName == "li") {
-                current.Add(XmlPipeline.CloneElement(childElement));
+                current.Add(childElement);
                 continue;
             }
 
             var existing = current.Elements(childElement.Name).FirstOrDefault();
             if (existing is null) {
-                current.Add(XmlPipeline.CloneElement(childElement));
+                current.Add(childElement);
                 continue;
             }
 
