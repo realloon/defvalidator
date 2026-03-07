@@ -59,35 +59,74 @@ public static class DefValidationEngine {
 }
 
 internal static class XmlPipeline {
+    private const string CorePackageId = "ludeon.rimworld";
+
     public static XDocument BuildAggregate(ModContext context, DiagnosticBag diagnostics) {
-        var defDocuments = new List<(ModInfo Mod, string FilePath, XDocument Document)>();
+        var aggregate = new XDocument(new XElement("Defs"));
 
         foreach (var mod in context.ModsInLoadOrder) {
-            foreach (var folder in mod.LoadFolders) {
-                var root = Path.GetFullPath(Path.Combine(mod.RootPath, folder));
-                CollectXmlDocuments(mod, root, "Defs", defDocuments, diagnostics, context.ActivePackageIds);
-            }
-        }
-
-        var aggregate = new XDocument(new XElement("Defs"));
-        foreach (var (_, _, document) in defDocuments) {
-            if (document.Root is null) {
+            if (string.Equals(mod.PackageId, CorePackageId, StringComparison.OrdinalIgnoreCase)) {
+                AppendAggregate(LoadCoreAggregate(mod, context.ActivePackageIds, diagnostics), aggregate);
                 continue;
             }
 
-            foreach (var child in document.Root.Elements()) {
-                aggregate.Root!.Add(CloneElement(child));
-            }
+            AppendModAggregate(mod, aggregate, diagnostics, context.ActivePackageIds);
         }
 
         return InheritanceResolver.Resolve(aggregate, diagnostics);
+    }
+
+    private static XDocument LoadCoreAggregate(
+        ModInfo coreMod,
+        IReadOnlySet<string> activePackageIds,
+        DiagnosticBag diagnostics) {
+        var cachePath = GetCoreXmlCachePath(coreMod, activePackageIds);
+        if (TryReadCoreCache(cachePath, out var cached)) {
+            return cached;
+        }
+
+        var aggregate = BuildModAggregate(coreMod, diagnostics, activePackageIds);
+        var resolved = InheritanceResolver.Resolve(aggregate, diagnostics);
+        var sanitized = SanitizeCachedAggregate(resolved);
+        TryWriteCoreCache(cachePath, sanitized);
+        return sanitized;
+    }
+
+    private static XDocument BuildModAggregate(
+        ModInfo mod,
+        DiagnosticBag diagnostics,
+        IReadOnlySet<string> activePackageIds) {
+        var aggregate = new XDocument(new XElement("Defs"));
+        AppendModAggregate(mod, aggregate, diagnostics, activePackageIds);
+        return aggregate;
+    }
+
+    private static void AppendModAggregate(
+        ModInfo mod,
+        XDocument aggregate,
+        DiagnosticBag diagnostics,
+        IReadOnlySet<string> activePackageIds) {
+        foreach (var folder in mod.LoadFolders) {
+            var root = Path.GetFullPath(Path.Combine(mod.RootPath, folder));
+            CollectXmlDocuments(mod, root, "Defs", aggregate.Root!, diagnostics, activePackageIds);
+        }
+    }
+
+    private static void AppendAggregate(XDocument source, XDocument destination) {
+        if (source.Root is null) {
+            return;
+        }
+
+        foreach (var child in source.Root.Elements()) {
+            destination.Root!.Add(CloneElement(child));
+        }
     }
 
     private static void CollectXmlDocuments(
         ModInfo mod,
         string root,
         string subfolder,
-        ICollection<(ModInfo Mod, string FilePath, XDocument Document)> destination,
+        XElement destination,
         DiagnosticBag diagnostics,
         IReadOnlySet<string> activePackageIds) {
         var directory = Path.Combine(root, subfolder);
@@ -99,12 +138,15 @@ internal static class XmlPipeline {
                      .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)) {
             try {
                 var document = XDocument.Load(filePath, LoadOptions.PreserveWhitespace | LoadOptions.SetLineInfo);
-                if (document.Root is not null) {
-                    Annotate(document.Root, filePath, mod.PackageId);
-                    ApplyMayRequire(document.Root, activePackageIds);
+                if (document.Root is null) {
+                    continue;
                 }
 
-                destination.Add((mod, filePath, document));
+                Annotate(document.Root, filePath, mod.PackageId);
+                ApplyMayRequire(document.Root, activePackageIds);
+                foreach (var child in document.Root.Elements()) {
+                    destination.Add(CloneElement(child));
+                }
             } catch (XmlException ex) {
                 diagnostics.Add("XML001", DiagnosticSeverity.Error, ex.Message, ValidationStage.XmlLoad, filePath,
                     ex.LineNumber, ex.LinePosition, mod.PackageId);
@@ -169,8 +211,86 @@ internal static class XmlPipeline {
         XComment comment => new XComment(comment.Value),
         _ => null
     };
-}
 
+    private static XDocument SanitizeCachedAggregate(XDocument document) {
+        var root = document.Root is null ? new XElement("Defs") : CloneElement(document.Root);
+        foreach (var element in root.DescendantsAndSelf()) {
+            element.RemoveAnnotations<SourceInfo>();
+            foreach (var attribute in element.Attributes()
+                         .Where(static attribute => attribute.Name.LocalName is "ParentName" or "Inherit"
+                             or "MayRequire" or "MayRequireAnyOf")
+                         .ToList()) {
+                attribute.Remove();
+            }
+        }
+
+        return new XDocument(root);
+    }
+
+    private static bool TryReadCoreCache(string cachePath, out XDocument aggregate) {
+        try {
+            if (!File.Exists(cachePath)) {
+                aggregate = new XDocument(new XElement("Defs"));
+                return false;
+            }
+
+            aggregate = XDocument.Load(cachePath, LoadOptions.PreserveWhitespace);
+            return aggregate.Root is not null;
+        } catch {
+            aggregate = new XDocument(new XElement("Defs"));
+            return false;
+        }
+    }
+
+    private static void TryWriteCoreCache(string cachePath, XDocument aggregate) {
+        try {
+            Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+            aggregate.Save(cachePath, SaveOptions.DisableFormatting);
+        } catch {
+        }
+    }
+
+    private static string GetCoreXmlCachePath(ModInfo coreMod, IReadOnlySet<string> activePackageIds) {
+        var builder = new System.Text.StringBuilder();
+        builder.Append("core-xml-v1").Append('\n');
+
+        foreach (var packageId in activePackageIds.OrderBy(static value => value, StringComparer.OrdinalIgnoreCase)) {
+            builder.Append("pkg|").Append(packageId).Append('\n');
+        }
+
+        foreach (var folder in coreMod.LoadFolders) {
+            var defsDirectory = Path.Combine(coreMod.RootPath, folder, "Defs");
+            if (!Directory.Exists(defsDirectory)) {
+                continue;
+            }
+
+            foreach (var filePath in Directory.EnumerateFiles(defsDirectory, "*.xml", SearchOption.AllDirectories)
+                         .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)) {
+                var info = new FileInfo(filePath);
+                builder.Append(Path.GetFullPath(filePath)).Append('|');
+                builder.Append(info.Length).Append('|');
+                builder.Append(info.LastWriteTimeUtc.Ticks).Append('\n');
+            }
+        }
+
+        var hashBytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(builder.ToString()));
+        var hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
+        return Path.Combine(GetCacheDirectory(), $"core-xml-{hash}.xml");
+    }
+
+    private static string GetCacheDirectory() {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (OperatingSystem.IsWindows()) {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DefValidator");
+        }
+
+        if (OperatingSystem.IsMacOS()) {
+            return Path.Combine(home, "Library", "Caches", "DefValidator");
+        }
+
+        return Path.Combine(home, ".cache", "defvalidator");
+    }
+}
 internal static class InheritanceResolver {
     public static XDocument Resolve(XDocument aggregate, DiagnosticBag diagnostics) {
         var root = aggregate.Root ?? new XElement("Defs");
