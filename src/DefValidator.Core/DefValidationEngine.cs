@@ -427,7 +427,7 @@ internal static class InheritanceResolver {
             current.ReplaceAttributes(child.Attributes()
                 .Where(static attribute => attribute.Name.LocalName != "Inherit")
                 .Select(static attribute => new XAttribute(attribute)));
-            current.ReplaceNodes(child.Nodes().ToList());
+            current.ReplaceNodes(child.Nodes().Select(CloneNodePreservingSource).Where(static node => node is not null)!);
             CopySource(current, child);
             return;
         }
@@ -447,19 +447,21 @@ internal static class InheritanceResolver {
 
         foreach (var childElement in elementChildren) {
             if (childElement.Name.LocalName == "li") {
-                current.Add(childElement);
+                current.Add(XmlPipeline.CloneElement(childElement));
                 continue;
             }
 
             var existing = current.Elements(childElement.Name).FirstOrDefault();
             if (existing is null) {
-                current.Add(childElement);
+                current.Add(XmlPipeline.CloneElement(childElement));
                 continue;
             }
 
             MergeInto(existing, childElement);
         }
     }
+
+    private static XNode? CloneNodePreservingSource(XNode node) => XmlPipeline.CloneNode(node);
 
     private static void CheckDuplicateChildNames(XElement element, DiagnosticBag diagnostics) {
         var duplicates = element.Elements()

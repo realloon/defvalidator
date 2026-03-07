@@ -14,7 +14,8 @@ internal sealed class TestRunner {
         (nameof(ModsConfig_IsNotSupported_Returns2), ModsConfig_IsNotSupported_Returns2),
         (nameof(MissingGameDirectory_UsesFileFirstFormat), MissingGameDirectory_UsesFileFirstFormat),
         (nameof(ProfileEnv_WritesTimingsToStdErr), ProfileEnv_WritesTimingsToStdErr),
-        (nameof(InheritanceResolver_PreservesSourceAnnotations), InheritanceResolver_PreservesSourceAnnotations)
+        (nameof(InheritanceResolver_PreservesSourceAnnotations), InheritanceResolver_PreservesSourceAnnotations),
+        (nameof(InheritanceResolver_PreservesSourceAnnotations_OnInheritFalseListItems), InheritanceResolver_PreservesSourceAnnotations_OnInheritFalseListItems)
     ];
 
     public async Task RunAsync() {
@@ -70,6 +71,42 @@ internal sealed class TestRunner {
         Assert.Equal(1, result.ExitCode);
         Assert.Contains(result.StdErr, "profile: build_context=");
         Assert.Contains(result.StdErr, "profile: total=");
+    }
+
+    private static Task InheritanceResolver_PreservesSourceAnnotations_OnInheritFalseListItems() {
+        var coreAssembly = typeof(DefValidationEngine).Assembly;
+        var diagnostics = CreateInternal(coreAssembly, "DefValidator.Core.DiagnosticBag");
+        var sourceInfoType = coreAssembly.GetType("DefValidator.Core.SourceInfo", throwOnError: true)!;
+        var resolve = coreAssembly
+            .GetType("DefValidator.Core.InheritanceResolver", throwOnError: true)!
+            .GetMethod("Resolve", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!;
+
+        var parent = new XElement("ThingDef",
+            new XAttribute("Name", "Parent"),
+            new XElement("comps", new XElement("li", new XElement("compClass", "ParentComp"))));
+        AddSourceInfo(parent, sourceInfoType, "/tmp/parent.xml", 3, 4, "core");
+        AddSourceInfo(parent.Element("comps")!, sourceInfoType, "/tmp/parent.xml", 4, 6, "core");
+        AddSourceInfo(parent.Descendants("li").Single(), sourceInfoType, "/tmp/parent.xml", 5, 8, "core");
+
+        var child = new XElement("ThingDef",
+            new XAttribute("ParentName", "Parent"),
+            new XElement("defName", "Child"),
+            new XElement("comps",
+                new XAttribute("Inherit", "False"),
+                new XElement("li", new XAttribute("Class", "XXX"))));
+        AddSourceInfo(child, sourceInfoType, "/tmp/child.xml", 10, 4, "mod");
+        AddSourceInfo(child.Element("comps")!, sourceInfoType, "/tmp/child.xml", 13, 6, "mod");
+        AddSourceInfo(child.Descendants("li").Single(), sourceInfoType, "/tmp/child.xml", 14, 8, "mod");
+
+        var result = (XDocument)resolve.Invoke(null, [new XDocument(new XElement("Defs", parent, child)), diagnostics])!;
+        var resolvedDef = result.Root!.Elements().Single(element => (string?)element.Element("defName") == "Child");
+        var resolvedLi = resolvedDef.Element("comps")!.Element("li")!;
+        var resolvedLiSource = GetAnnotation(resolvedLi, sourceInfoType);
+
+        Assert.NotNull(resolvedLiSource);
+        Assert.Equal("mod", sourceInfoType.GetProperty("PackageId")!.GetValue(resolvedLiSource));
+        Assert.Equal("/tmp/child.xml", sourceInfoType.GetProperty("File")!.GetValue(resolvedLiSource));
+        return Task.CompletedTask;
     }
 
     private static Task InheritanceResolver_PreservesSourceAnnotations() {
