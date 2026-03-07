@@ -9,7 +9,8 @@ internal sealed class TestRunner {
         (nameof(UnknownArgument_Returns2), UnknownArgument_Returns2),
         (nameof(AutoDetectedGameDir_ValidatesModPath), AutoDetectedGameDir_ValidatesModPath),
         (nameof(ModsConfig_IsNotSupported_Returns2), ModsConfig_IsNotSupported_Returns2),
-        (nameof(MissingGameDirectory_UsesFileFirstFormat), MissingGameDirectory_UsesFileFirstFormat)
+        (nameof(MissingGameDirectory_UsesFileFirstFormat), MissingGameDirectory_UsesFileFirstFormat),
+        (nameof(ProfileEnv_WritesTimingsToStdErr), ProfileEnv_WritesTimingsToStdErr)
     ];
 
     public async Task RunAsync() {
@@ -59,14 +60,28 @@ internal sealed class TestRunner {
         Assert.Contains(result.StdOut, "/defvalidator/missing-game-dir:0:0: error CTX001: Game directory does not exist: /defvalidator/missing-game-dir");
     }
 
-    private static async Task<CliResult> RunCliAsync(string[] args) {
+    private static async Task ProfileEnv_WritesTimingsToStdErr() {
+        var result = await RunCliAsync(["some-mod", "--game-dir", "/defvalidator/missing-game-dir"],
+            new Dictionary<string, string?> { ["DEFVALIDATOR_PROFILE"] = "1" });
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains(result.StdErr, "profile: build_context=");
+        Assert.Contains(result.StdErr, "profile: total=");
+    }
+
+    private static async Task<CliResult> RunCliAsync(string[] args, IReadOnlyDictionary<string, string?>? environment = null) {
         var repoRoot = FindRepoRoot();
-        var cliDll = Path.Combine(repoRoot, "src", "DefValidator.Cli", "bin", "Debug", "net10.0", "defvalidator.dll");
+        var cliDll = Path.Combine(repoRoot, "src", "DefValidator.Cli", "bin", "Release", "net10.0", "defvalidator.dll");
         var startInfo = new ProcessStartInfo("dotnet") {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             WorkingDirectory = repoRoot
         };
+
+        if (environment is not null) {
+            foreach (var pair in environment) {
+                startInfo.Environment[pair.Key] = pair.Value;
+            }
+        }
 
         startInfo.ArgumentList.Add(cliDll);
         foreach (var arg in args) {

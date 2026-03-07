@@ -36,6 +36,10 @@ public sealed record ValidationResult(ValidationSummary Summary, IReadOnlyList<D
     public int GetExitCode() => Summary.ErrorCount > 0 ? 1 : 0;
 }
 
+public sealed record ValidationTiming(string Name, TimeSpan Elapsed);
+
+public sealed record ValidationRun(ValidationResult Result, IReadOnlyList<ValidationTiming> Timings);
+
 internal sealed class DiagnosticBag {
     private readonly List<Diagnostic> _items = [];
 

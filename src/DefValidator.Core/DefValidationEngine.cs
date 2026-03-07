@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Xml;
 using System.Xml.Linq;
@@ -5,21 +6,58 @@ using System.Xml.Linq;
 namespace DefValidator.Core;
 
 public static class DefValidationEngine {
-    public static Task<ValidationResult> ValidateAsync(ValidationOptions options, CancellationToken cancellationToken) {
+    public static async Task<ValidationResult> ValidateAsync(ValidationOptions options, CancellationToken cancellationToken) {
+        var run = await ValidateWithProfileAsync(options, cancellationToken);
+        return run.Result;
+    }
+
+    public static Task<ValidationRun> ValidateWithProfileAsync(ValidationOptions options, CancellationToken cancellationToken) {
         cancellationToken.ThrowIfCancellationRequested();
 
+        var timings = new List<ValidationTiming>();
+        var total = Stopwatch.StartNew();
         var diagnostics = new DiagnosticBag();
-        var context = ModContextBuilder.Build(options, diagnostics);
+
+        var context = MeasureValue("build_context", () => ModContextBuilder.Build(options, diagnostics));
         if (context is null) {
-            return Task.FromResult(diagnostics.ToResult());
+            return Task.FromResult(Finish(diagnostics.ToResult()));
         }
 
-        var catalog = AssemblyCatalog.Load(context, diagnostics);
-        var aggregate = XmlPipeline.BuildAggregate(context, diagnostics);
+        var catalog = MeasureValue("load_metadata", () => AssemblyCatalog.Load(context, diagnostics));
+        var aggregate = MeasureValue("build_xml", () => XmlPipeline.BuildAggregate(context, diagnostics));
+        MeasureStep("semantic_validate", () => {
+            var validator = new SemanticValidator(catalog, diagnostics);
+            validator.Validate(aggregate);
+        });
 
-        var validator = new SemanticValidator(catalog, diagnostics);
-        validator.Validate(aggregate);
-        return Task.FromResult(FilterDiagnostics(diagnostics.ToResult(), context));
+        var result = MeasureValue("filter_diagnostics", () => FilterDiagnostics(diagnostics.ToResult(), context));
+        return Task.FromResult(Finish(result));
+
+        T MeasureValue<T>(string name, Func<T> action) {
+            var stopwatch = Stopwatch.StartNew();
+            try {
+                return action();
+            } finally {
+                stopwatch.Stop();
+                timings.Add(new ValidationTiming(name, stopwatch.Elapsed));
+            }
+        }
+
+        void MeasureStep(string name, Action action) {
+            var stopwatch = Stopwatch.StartNew();
+            try {
+                action();
+            } finally {
+                stopwatch.Stop();
+                timings.Add(new ValidationTiming(name, stopwatch.Elapsed));
+            }
+        }
+
+        ValidationRun Finish(ValidationResult result) {
+            total.Stop();
+            timings.Add(new ValidationTiming("total", total.Elapsed));
+            return new ValidationRun(result, timings);
+        }
     }
 
     private static ValidationResult FilterDiagnostics(ValidationResult result, ModContext context) {
@@ -57,7 +95,6 @@ public static class DefValidationEngine {
     private static readonly HashSet<string> BlockingContextCodes =
         ["CTX001", "CTX002", "CTX003", "CTX004", "CTX005", "CTX006", "CTX007"];
 }
-
 internal static class XmlPipeline {
     private const string CorePackageId = "ludeon.rimworld";
 
@@ -228,67 +265,36 @@ internal static class XmlPipeline {
     }
 
     private static bool TryReadCoreCache(string cachePath, out XDocument aggregate) {
-        try {
-            if (!File.Exists(cachePath)) {
-                aggregate = new XDocument(new XElement("Defs"));
-                return false;
-            }
-
-            aggregate = XDocument.Load(cachePath, LoadOptions.PreserveWhitespace);
-            return aggregate.Root is not null;
-        } catch {
-            aggregate = new XDocument(new XElement("Defs"));
-            return false;
-        }
+        return CacheFiles.TryReadXml(cachePath, out aggregate);
     }
 
     private static void TryWriteCoreCache(string cachePath, XDocument aggregate) {
-        try {
-            Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
-            aggregate.Save(cachePath, SaveOptions.DisableFormatting);
-        } catch {
-        }
+        CacheFiles.TryWriteXml(cachePath, aggregate);
     }
 
     private static string GetCoreXmlCachePath(ModInfo coreMod, IReadOnlySet<string> activePackageIds) {
-        var builder = new System.Text.StringBuilder();
-        builder.Append("core-xml-v1").Append('\n');
+        IEnumerable<string> Fingerprint() {
+            yield return "core-xml-v1";
 
-        foreach (var packageId in activePackageIds.OrderBy(static value => value, StringComparer.OrdinalIgnoreCase)) {
-            builder.Append("pkg|").Append(packageId).Append('\n');
-        }
-
-        foreach (var folder in coreMod.LoadFolders) {
-            var defsDirectory = Path.Combine(coreMod.RootPath, folder, "Defs");
-            if (!Directory.Exists(defsDirectory)) {
-                continue;
+            foreach (var packageId in activePackageIds.OrderBy(static value => value, StringComparer.OrdinalIgnoreCase)) {
+                yield return $"pkg|{packageId}";
             }
 
-            foreach (var filePath in Directory.EnumerateFiles(defsDirectory, "*.xml", SearchOption.AllDirectories)
-                         .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)) {
-                var info = new FileInfo(filePath);
-                builder.Append(Path.GetFullPath(filePath)).Append('|');
-                builder.Append(info.Length).Append('|');
-                builder.Append(info.LastWriteTimeUtc.Ticks).Append('\n');
+            foreach (var folder in coreMod.LoadFolders) {
+                var defsDirectory = Path.Combine(coreMod.RootPath, folder, "Defs");
+                if (!Directory.Exists(defsDirectory)) {
+                    continue;
+                }
+
+                foreach (var filePath in Directory.EnumerateFiles(defsDirectory, "*.xml", SearchOption.AllDirectories)
+                             .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)) {
+                    var info = new FileInfo(filePath);
+                    yield return $"{Path.GetFullPath(filePath)}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
+                }
             }
         }
 
-        var hashBytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(builder.ToString()));
-        var hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
-        return Path.Combine(GetCacheDirectory(), $"core-xml-{hash}.xml");
-    }
-
-    private static string GetCacheDirectory() {
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        if (OperatingSystem.IsWindows()) {
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DefValidator");
-        }
-
-        if (OperatingSystem.IsMacOS()) {
-            return Path.Combine(home, "Library", "Caches", "DefValidator");
-        }
-
-        return Path.Combine(home, ".cache", "defvalidator");
+        return CacheFiles.BuildPath("core-xml", "xml", Fingerprint());
     }
 }
 internal static class InheritanceResolver {

@@ -1,6 +1,4 @@
 using System.Reflection;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 
 namespace DefValidator.Core;
@@ -403,35 +401,13 @@ internal sealed class AssemblyCatalog {
     }
 
     private static string GetCoreCachePath(IReadOnlyList<string> gameAssemblyPaths) {
-        var builder = new StringBuilder();
-        foreach (var path in gameAssemblyPaths.OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)) {
-            var info = new FileInfo(path);
-            builder.Append(Path.GetFullPath(path));
-            builder.Append('|');
-            builder.Append(info.Length);
-            builder.Append('|');
-            builder.Append(info.LastWriteTimeUtc.Ticks);
-            builder.Append('\n');
-        }
-
-        var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()));
-        var hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
-        return Path.Combine(GetCacheDirectory(), $"core-types-{hash}.json");
+        return CacheFiles.BuildPath("core-types", "json", gameAssemblyPaths
+            .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)
+            .Select(static path => {
+                var info = new FileInfo(path);
+                return $"{Path.GetFullPath(path)}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
+            }));
     }
-
-    private static string GetCacheDirectory() {
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        if (OperatingSystem.IsWindows()) {
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DefValidator");
-        }
-
-        if (OperatingSystem.IsMacOS()) {
-            return Path.Combine(home, "Library", "Caches", "DefValidator");
-        }
-
-        return Path.Combine(home, ".cache", "defvalidator");
-    }
-
     private static bool TryReadCache(string cachePath, out IReadOnlyList<CatalogType> types) {
         try {
             if (!File.Exists(cachePath)) {
@@ -439,8 +415,10 @@ internal sealed class AssemblyCatalog {
                 return false;
             }
 
-            var json = File.ReadAllText(cachePath);
-            var cache = JsonSerializer.Deserialize<AssemblyCatalogCache>(json);
+            if (!CacheFiles.TryReadJson<AssemblyCatalogCache>(cachePath, out var cache)) {
+                types = [];
+                return false;
+            }
             if (cache?.Version != 1 || cache.Types is null) {
                 types = [];
                 return false;
@@ -456,10 +434,8 @@ internal sealed class AssemblyCatalog {
 
     private static void TryWriteCache(string cachePath, IReadOnlyList<CatalogType> types) {
         try {
-            Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
             var cache = new AssemblyCatalogCache(1, types.Select(static type => CachedType.From(type)).ToList());
-            var json = JsonSerializer.Serialize(cache);
-            File.WriteAllText(cachePath, json);
+            CacheFiles.TryWriteJson(cachePath, cache);
         } catch {
         }
     }

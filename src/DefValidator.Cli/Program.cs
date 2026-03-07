@@ -10,12 +10,19 @@ internal static class CliProgram {
             return 2;
         }
 
-        var result = await DefValidationEngine.ValidateAsync(parseResult.Options!, CancellationToken.None);
-        foreach (var diagnostic in result.Diagnostics) {
+        var profileEnabled = ProfileOutput.IsEnabled();
+        var run = profileEnabled
+            ? await DefValidationEngine.ValidateWithProfileAsync(parseResult.Options!, CancellationToken.None)
+            : new ValidationRun(await DefValidationEngine.ValidateAsync(parseResult.Options!, CancellationToken.None), []);
+        foreach (var diagnostic in run.Result.Diagnostics) {
             Console.WriteLine(FormatText(diagnostic));
         }
 
-        return result.GetExitCode();
+        if (profileEnabled) {
+            await ProfileOutput.WriteAsync(run.Timings);
+        }
+
+        return run.Result.GetExitCode();
     }
 
     private static string FormatText(Diagnostic diagnostic) {
@@ -31,6 +38,19 @@ internal static class CliProgram {
         return prefix +
                $"{diagnostic.Severity.ToString().ToLowerInvariant()} {diagnostic.Code}: {diagnostic.Message}" +
                (subject.Length > 0 ? $" [{subject}]" : string.Empty);
+    }
+}
+
+internal static class ProfileOutput {
+    public static bool IsEnabled() {
+        var value = Environment.GetEnvironmentVariable("DEFVALIDATOR_PROFILE");
+        return value is not null && value is not ("0" or "false" or "False");
+    }
+
+    public static async Task WriteAsync(IReadOnlyList<ValidationTiming> timings) {
+        foreach (var timing in timings) {
+            await Console.Error.WriteLineAsync($"profile: {timing.Name}={timing.Elapsed.TotalMilliseconds:F1}ms");
+        }
     }
 }
 
