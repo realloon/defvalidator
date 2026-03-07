@@ -19,19 +19,18 @@ internal static class CliProgram {
     }
 
     private static string FormatText(Diagnostic diagnostic) {
-        var location = diagnostic.File is null
+        var prefix = diagnostic.File is null
             ? ""
-            : $" {diagnostic.File}:{diagnostic.Line ?? 0}:{diagnostic.Column ?? 0}";
+            : $"{diagnostic.File}:{diagnostic.Line ?? 0}:{diagnostic.Column ?? 0}: ";
 
         var subject = string.Join(
             "/",
             new[] { diagnostic.PackageId, diagnostic.DefType, diagnostic.DefName }
                 .Where(static value => !string.IsNullOrWhiteSpace(value)));
 
-        return $"{diagnostic.Severity.ToString().ToUpperInvariant()} {diagnostic.Code} [{diagnostic.Stage}]" +
-               (subject.Length > 0 ? $" {subject}" : string.Empty) +
-               location +
-               $" {diagnostic.Message}";
+        return prefix +
+               $"{diagnostic.Severity.ToString().ToLowerInvariant()} {diagnostic.Code}: {diagnostic.Message}" +
+               (subject.Length > 0 ? $" [{subject}]" : string.Empty);
     }
 }
 
@@ -42,7 +41,7 @@ internal static class CliParser {
         try {
             if (args.Count == 0) {
                 return Fail(
-                    "Usage: defvalidator <mod-path> [--game-dir <path>]\nMissing --game-dir can be filled from .env via DEFVALIDATOR_GAME_DIR.");
+                    "Usage: defvalidator <mod-path> [--game-dir <path>]\nIf --game-dir is omitted, defvalidator tries the default Steam install path for the current user.");
             }
 
             var modPath = args[0];
@@ -59,11 +58,9 @@ internal static class CliParser {
                 }
             }
 
-            var dotEnvPath = Path.Combine(Environment.CurrentDirectory, ".env");
-            gameDir ??= DotEnvFile.ReadValue(dotEnvPath, "DEFVALIDATOR_GAME_DIR");
-
+            gameDir ??= GameDirectoryLocator.TryFindDefault();
             if (string.IsNullOrWhiteSpace(gameDir)) {
-                return Fail("Missing required option --game-dir. You can also set DEFVALIDATOR_GAME_DIR in .env.");
+                return Fail("Could not find RimWorld in the default Steam install path. Pass --game-dir <path>.");
             }
 
             return new CliParseResult(
@@ -87,36 +84,33 @@ internal static class CliParser {
     private static CliParseResult Fail(string message) => new(false, message, null);
 }
 
-internal static class DotEnvFile {
-    public static string? ReadValue(string path, string key) {
-        if (!File.Exists(path)) {
-            return null;
-        }
-
-        foreach (var rawLine in File.ReadLines(path)) {
-            var line = rawLine.Trim();
-            if (line.Length == 0 || line.StartsWith('#')) {
-                continue;
+internal static class GameDirectoryLocator {
+    public static string? TryFindDefault() {
+        foreach (var candidate in EnumerateCandidates()) {
+            if (Directory.Exists(candidate)) {
+                return candidate;
             }
-
-            var separatorIndex = line.IndexOf('=');
-            if (separatorIndex <= 0) {
-                continue;
-            }
-
-            if (!line[..separatorIndex].Trim().Equals(key, StringComparison.OrdinalIgnoreCase)) {
-                continue;
-            }
-
-            var value = line[(separatorIndex + 1)..].Trim();
-            if (value.Length >= 2 && ((value.StartsWith('"') && value.EndsWith('"')) ||
-                                      (value.StartsWith("'") && value.EndsWith("'")))) {
-                return value[1..^1];
-            }
-
-            return value;
         }
 
         return null;
+    }
+
+    private static IEnumerable<string> EnumerateCandidates() {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrWhiteSpace(home)) {
+            yield return Path.Combine(home, "Library", "Application Support", "Steam", "steamapps", "common", "RimWorld", "RimWorldMac.app");
+            yield return Path.Combine(home, ".steam", "steam", "steamapps", "common", "RimWorld");
+            yield return Path.Combine(home, ".local", "share", "Steam", "steamapps", "common", "RimWorld");
+        }
+
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        if (!string.IsNullOrWhiteSpace(programFilesX86)) {
+            yield return Path.Combine(programFilesX86, "Steam", "steamapps", "common", "RimWorld");
+        }
+
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        if (!string.IsNullOrWhiteSpace(programFiles)) {
+            yield return Path.Combine(programFiles, "Steam", "steamapps", "common", "RimWorld");
+        }
     }
 }
