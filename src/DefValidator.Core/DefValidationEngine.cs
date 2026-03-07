@@ -366,7 +366,11 @@ internal static class InheritanceResolver {
         var resolved = new Dictionary<XElement, XElement>();
         var visiting = new HashSet<XElement>();
 
-        var newRoot = new XElement("Defs", nodes.Select(ResolveNode));
+        var newRoot = new XElement("Defs");
+        foreach (var node in nodes) {
+            newRoot.Add(XmlPipeline.CloneElement(ResolveNode(node)));
+        }
+
         return new XDocument(newRoot);
 
         XElement ResolveNode(NodeEntry node) {
@@ -579,9 +583,9 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
     }
 
     private void ValidateObject(XElement element, CatalogType declaredType, string defType, string? defName,
-        bool isRoot = false) {
+        bool isRoot = false, CatalogType? resolvedType = null) {
         Measure("validate_object", () => {
-        var actualType = ResolveClassOverride(element, declaredType, defType, defName) ?? declaredType;
+        var actualType = resolvedType ?? ResolveClassOverride(element, declaredType, defType, defName) ?? declaredType;
         var members = MeasureValue("get_members", () => catalog.GetMembers(actualType));
         var duplicates = element.Elements()
             .Where(static child => child.Name.LocalName != "li")
@@ -628,7 +632,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
                 if (catalog.IsScalar(effectiveItemType)) {
                     ValidateScalar(item, effectiveItemType, defType, defName);
                 } else {
-                    ValidateObject(item, effectiveItemType, defType, defName);
+                    ValidateObject(item, itemType, defType, defName, resolvedType: effectiveItemType);
                 }
             }
 
@@ -646,13 +650,16 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
             return;
         }
 
-        if ((memberType.IsAbstract || memberType.IsInterface) && element.Attribute("Class") is null) {
+        var resolvedMemberType = ResolveClassOverride(element, memberType, defType, defName) ?? memberType;
+        if ((memberType.IsAbstract || memberType.IsInterface)
+            && element.Attribute("Class") is null
+            && ReferenceEquals(resolvedMemberType, memberType)) {
             AddDiagnostic(element, "TYPE004", DiagnosticSeverity.Error,
                 $"Type {memberType.Name} requires a Class attribute.", ValidationStage.Type, defType, defName);
             return;
         }
 
-        ValidateObject(element, memberType, defType, defName);
+        ValidateObject(element, memberType, defType, defName, resolvedType: resolvedMemberType);
         });
     }
 
