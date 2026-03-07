@@ -66,11 +66,11 @@ internal static class CacheFiles {
     private static string GetCacheDirectory() {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         if (OperatingSystem.IsWindows()) {
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DefValidator");
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "defvalidator");
         }
 
         if (OperatingSystem.IsMacOS()) {
-            return Path.Combine(home, "Library", "Caches", "DefValidator");
+            return Path.Combine(home, "Library", "Caches", "defvalidator");
         }
 
         return Path.Combine(home, ".cache", "defvalidator");

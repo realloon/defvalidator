@@ -74,5 +74,5 @@ function detectRid() {
 }
 
 function printHelp() {
-  console.log(`Usage: bun scripts/publish.js [rid]\n\nPublishes the DefValidator single-file executable.\n\nExamples:\n  bun scripts/publish.js\n  bun scripts/publish.js osx-arm64\n  CONFIGURATION=Debug bun scripts/publish.js win-x64`);
+  console.log(`Usage: bun scripts/publish.js [rid]\n\nPublishes the defvalidator single-file executable.\n\nExamples:\n  bun scripts/publish.js\n  bun scripts/publish.js osx-arm64\n  CONFIGURATION=Debug bun scripts/publish.js win-x64`);
 }

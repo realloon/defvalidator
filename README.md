@@ -1,8 +1,8 @@
-# DefValidator
+# defvalidator
 
 A small CLI for validating RimWorld Def XML for a single target mod.
 
-`DefValidator` aims to be close to game loading without executing game or mod code. It is intentionally narrower than a full runtime simulation.
+`defvalidator` aims to be close to game loading without executing game or mod code. It is intentionally narrower than a full runtime simulation.
 
 ## What it does
 
@@ -103,9 +103,9 @@ mv defvalidator ~/.local/bin/defvalidator
 
 Default locations:
 
-- macOS: `~/Library/Caches/DefValidator`
+- macOS: `~/Library/Caches/defvalidator`
 - Linux: `~/.cache/defvalidator`
-- Windows: `%LocalAppData%\DefValidator`
+- Windows: `%LocalAppData%\defvalidator`
 
 The cache is safe to delete manually. `defvalidator` will rebuild it on the next run.
 
@@ -129,7 +129,7 @@ The publish script builds a single-file executable for the current platform by d
 
 ## Status
 
-`DefValidator` is already useful as a focused terminal validator, but it is still intentionally conservative in scope.
+`defvalidator` is already useful as a focused terminal validator, but it is still intentionally conservative in scope.
 
 Future work, if needed, should continue to prefer:
 
