@@ -15,6 +15,9 @@ internal sealed class TestRunner {
         (nameof(ModsConfig_IsNotSupported_Returns2), ModsConfig_IsNotSupported_Returns2),
         (nameof(MissingGameDirectory_UsesFileFirstFormat), MissingGameDirectory_UsesFileFirstFormat),
         (nameof(ProfileEnv_WritesTimingsToStdErr), ProfileEnv_WritesTimingsToStdErr),
+        (nameof(AssemblyCatalog_DoesNotTreatCustomEnumerablesAsXmlLists), AssemblyCatalog_DoesNotTreatCustomEnumerablesAsXmlLists),
+        (nameof(AssemblyCatalog_SupportsOnlyKnownLeafTextTypes), AssemblyCatalog_SupportsOnlyKnownLeafTextTypes),
+        (nameof(SemanticValidator_RejectsInvalidCurvePointLeafText), SemanticValidator_RejectsInvalidCurvePointLeafText),
         (nameof(InheritanceResolver_PreservesSourceAnnotations), InheritanceResolver_PreservesSourceAnnotations),
         (nameof(InheritanceResolver_PreservesSourceAnnotations_OnInheritFalseListItems), InheritanceResolver_PreservesSourceAnnotations_OnInheritFalseListItems)
     ];
@@ -160,6 +163,50 @@ internal sealed class TestRunner {
         return Task.CompletedTask;
     }
 
+    private static Task AssemblyCatalog_DoesNotTreatCustomEnumerablesAsXmlLists() {
+        var coreAssembly = typeof(DefValidationEngine).Assembly;
+        var containerType = CreateCatalogType(coreAssembly, typeof(FakeContainer));
+        var members = GetProperty(containerType, "DeclaredMembers")
+                      ?? throw new InvalidOperationException("DeclaredMembers was null.");
+
+        var curveMember = GetIndexerValue(members, "curve")
+                          ?? throw new InvalidOperationException("Missing curve member.");
+        var pointsMember = GetIndexerValue(members, "points")
+                           ?? throw new InvalidOperationException("Missing points member.");
+
+        Assert.Null(GetProperty(curveMember, "ListItemTypeName"));
+        Assert.Equal(typeof(FakePoint).FullName, GetProperty(pointsMember, "ListItemTypeName"));
+        return Task.CompletedTask;
+    }
+
+    private static Task AssemblyCatalog_SupportsOnlyKnownLeafTextTypes() {
+        var coreAssembly = typeof(DefValidationEngine).Assembly;
+        var catalog = CreateInternal(coreAssembly, "DefValidator.Core.AssemblyCatalog");
+        var supportsLeafText = catalog.GetType()
+            .GetMethod("SupportsLeafText", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
+
+        var curvePointType = CreateSyntheticCatalogType(coreAssembly, "CurvePoint", "Verse.CurvePoint");
+        var byteRangeType = CreateSyntheticCatalogType(coreAssembly, "ByteRange", "Verse.ByteRange");
+
+        Assert.Equal(true, supportsLeafText.Invoke(catalog, [curvePointType]));
+        Assert.Equal(false, supportsLeafText.Invoke(catalog, [byteRangeType]));
+        return Task.CompletedTask;
+    }
+
+    private static Task SemanticValidator_RejectsInvalidCurvePointLeafText() {
+        var coreAssembly = typeof(DefValidationEngine).Assembly;
+        var catalog = CreateInternal(coreAssembly, "DefValidator.Core.AssemblyCatalog");
+        var diagnostics = CreateInternal(coreAssembly, "DefValidator.Core.DiagnosticBag");
+        var validator = CreateInternal(coreAssembly, "DefValidator.Core.SemanticValidator", catalog, diagnostics, "test.mod", null);
+        var isAssignable = validator.GetType()
+            .GetMethod("IsScalarValueAssignable", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var curvePointType = CreateSyntheticCatalogType(coreAssembly, "CurvePoint", "Verse.CurvePoint");
+
+        Assert.Equal(true, isAssignable.Invoke(validator, [curvePointType, "(1, 2)"]));
+        Assert.Equal(false, isAssignable.Invoke(validator, [curvePointType, "not-a-point"]));
+        return Task.CompletedTask;
+    }
+
     private static object CreateInternal(Assembly assembly, string typeName, params object?[] args) {
         var type = assembly.GetType(typeName, throwOnError: true)!;
         return Activator.CreateInstance(type,
@@ -168,6 +215,37 @@ internal sealed class TestRunner {
                    args: args,
                    culture: null)
                ?? throw new InvalidOperationException($"Failed to create {typeName}.");
+    }
+
+    private static object CreateCatalogType(Assembly assembly, Type sourceType) {
+        var catalogType = assembly.GetType("DefValidator.Core.AssemblyCatalog", throwOnError: true)!;
+        var createType = catalogType.GetMethod("CreateType", BindingFlags.Static | BindingFlags.NonPublic)!;
+        return createType.Invoke(null, [sourceType]) ?? throw new InvalidOperationException("CreateType returned null.");
+    }
+
+    private static object CreateSyntheticCatalogType(Assembly assembly, string name, string fullName) {
+        var catalogType = assembly.GetType("DefValidator.Core.CatalogType", throwOnError: true)!;
+        var catalogMemberType = assembly.GetType("DefValidator.Core.CatalogMember", throwOnError: true)!;
+        var membersType = typeof(Dictionary<,>).MakeGenericType(typeof(string), catalogMemberType);
+        var members = Activator.CreateInstance(membersType)
+                      ?? throw new InvalidOperationException("Failed to create members dictionary.");
+
+        return Activator.CreateInstance(catalogType,
+                   BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                   binder: null,
+                   args: [name, fullName, null, Array.Empty<string>(), false, false, false, false, Array.Empty<string>(), members],
+                   culture: null)
+               ?? throw new InvalidOperationException("Failed to create synthetic CatalogType.");
+    }
+
+    private static object? GetProperty(object target, string propertyName) {
+        return target.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+            .GetValue(target);
+    }
+
+    private static object? GetIndexerValue(object target, string key) {
+        return target.GetType().GetProperty("Item", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+            .GetValue(target, [key]);
     }
 
     private static void AddSourceInfo(XElement element, Type sourceInfoType, string file, int line, int column, string packageId) {
@@ -211,10 +289,11 @@ internal sealed class TestRunner {
 
         using var process = Process.Start(startInfo) ??
                             throw new InvalidOperationException("Failed to start CLI process.");
-        var stdOut = await process.StandardOutput.ReadToEndAsync();
-        var stdErr = await process.StandardError.ReadToEndAsync();
+        var stdOutTask = process.StandardOutput.ReadToEndAsync();
+        var stdErrTask = process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
-        return new CliResult(process.ExitCode, stdOut, stdErr);
+        await Task.WhenAll(stdOutTask, stdErrTask);
+        return new CliResult(process.ExitCode, stdOutTask.Result, stdErrTask.Result);
     }
 
     private static string FindCliDll(string repoRoot) {
@@ -245,6 +324,21 @@ internal sealed class TestRunner {
     }
 
     private sealed record CliResult(int ExitCode, string StdOut, string StdErr);
+
+    private sealed class FakeContainer {
+        public FakeCurve curve = new();
+        public List<FakePoint> points = [];
+    }
+
+    private sealed class FakeCurve : IEnumerable<FakePoint> {
+        private readonly List<FakePoint> _items = [];
+
+        public IEnumerator<FakePoint> GetEnumerator() => _items.GetEnumerator();
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    private readonly record struct FakePoint(int X, int Y);
 }
 
 internal static class Assert {
@@ -257,6 +351,12 @@ internal static class Assert {
     public static void Contains(string value, string expectedSubstring) {
         if (!value.Contains(expectedSubstring, StringComparison.Ordinal)) {
             throw new InvalidOperationException($"Expected substring '{expectedSubstring}' in: {value}");
+        }
+    }
+
+    public static void Null(object? value) {
+        if (value is not null) {
+            throw new InvalidOperationException($"Expected null but got '{value}'.");
         }
     }
 

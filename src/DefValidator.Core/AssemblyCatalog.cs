@@ -121,9 +121,17 @@ internal sealed class AssemblyCatalog {
                || type.FullName is "System.String" or "System.Decimal" or "System.Type";
     }
 
-    public bool IsAssignableTo(CatalogType candidate, CatalogType target) => IsAssignableTo(candidate, target.DisplayName);
+    public bool SupportsLeafText(CatalogType type) {
+        return IsScalar(type)
+               || IsParseHelperLeafType(type)
+               || IsAssignableTo(type, "RimWorld.QuestGen.ISlateRef");
+    }
 
-    private bool IsAssignableTo(CatalogType candidate, string targetName) {
+    public bool IsAssignableTo(CatalogType candidate, CatalogType target) => IsAssignableToName(candidate, target.DisplayName);
+
+    public bool IsAssignableTo(CatalogType candidate, string targetTypeName) => IsAssignableToName(candidate, targetTypeName);
+
+    private bool IsAssignableToName(CatalogType candidate, string targetName) {
         return GetAssignableNames(candidate).Contains(targetName);
     }
 
@@ -388,24 +396,57 @@ internal sealed class AssemblyCatalog {
     };
 
     private static Type? TryGetEnumerableItemType(Type type) {
-        if (type.IsArray) {
-            return type.GetElementType();
+        if (!TryGetTypeWithGenericDefinition(type, "System.Collections.Generic.List`1", out var enumerable)) {
+            return null;
         }
 
-        var enumerable = type
-            .GetInterfaces()
-            .Concat([type])
-            .FirstOrDefault(static candidate => candidate.IsGenericType &&
-                                                candidate.GetGenericTypeDefinition().FullName ==
-                                                "System.Collections.Generic.IEnumerable`1");
-
         return enumerable?.GetGenericArguments()[0];
+    }
+
+    private static bool TryGetTypeWithGenericDefinition(Type type, string genericDefinitionName, out Type? match) {
+        foreach (var candidate in type.GetInterfaces().Concat([type])) {
+            if (!candidate.IsGenericType) {
+                continue;
+            }
+
+            if (candidate.GetGenericTypeDefinition().FullName == genericDefinitionName) {
+                match = candidate;
+                return true;
+            }
+        }
+
+        match = null;
+        return false;
     }
 
     private static Type UnwrapNullableType(Type type) {
         return type.IsGenericType && type.GetGenericTypeDefinition().FullName == "System.Nullable`1"
             ? type.GetGenericArguments()[0]
             : type;
+    }
+
+    private static bool IsParseHelperLeafType(CatalogType type) {
+        return type.FullName is
+            "System.Action"
+            or "UnityEngine.Vector2"
+            or "UnityEngine.Vector3"
+            or "UnityEngine.Vector4"
+            or "UnityEngine.Quaternion"
+            or "UnityEngine.Rect"
+            or "UnityEngine.Color"
+            or "Verse.ColorInt"
+            or "Verse.IntVec2"
+            or "Verse.IntVec3"
+            or "Verse.Rot4"
+            or "Verse.CellRect"
+            or "Verse.CurvePoint"
+            or "Verse.NameTriple"
+            or "Verse.FloatRange"
+            or "Verse.IntRange"
+            or "RimWorld.QualityRange"
+            or "Verse.TaggedString"
+            or "RimWorld.Planet.PlanetTile"
+            or "Steamworks.PublishedFileId_t";
     }
 
     private static IEnumerable<string> GetAliases(MemberInfo member) {
@@ -496,7 +537,7 @@ internal sealed class AssemblyCatalog {
                 return false;
             }
 
-            if (cache is null || cache.Version != 1 || cache.Types is null) {
+            if (cache is null || cache.Version != 3 || cache.Types is null) {
                 types = [];
                 return false;
             }
@@ -511,7 +552,7 @@ internal sealed class AssemblyCatalog {
 
     private static void TryWriteCache(string cachePath, IReadOnlyList<CatalogType> types) {
         try {
-            var cache = new AssemblyCatalogCache(1, types.Select(static type => CachedType.From(type)).ToList());
+            var cache = new AssemblyCatalogCache(3, types.Select(static type => CachedType.From(type)).ToList());
             CacheFiles.TryWriteMemoryPack(cachePath, cache);
         } catch {
         }

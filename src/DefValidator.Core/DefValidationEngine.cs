@@ -636,7 +636,7 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
                     continue;
                 }
 
-                if (catalog.IsScalar(effectiveItemType)) {
+                if (CanValidateAsLeafText(item, effectiveItemType)) {
                     ValidateScalar(item, effectiveItemType, defType, defName);
                 } else {
                     ValidateObject(item, itemType, defType, defName, resolvedType: effectiveItemType);
@@ -658,6 +658,11 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
         }
 
         var resolvedMemberType = ResolveClassOverride(element, memberType, defType, defName) ?? memberType;
+        if (CanValidateAsLeafText(element, resolvedMemberType)) {
+            ValidateScalar(element, resolvedMemberType, defType, defName);
+            return;
+        }
+
         if ((memberType.IsAbstract || memberType.IsInterface)
             && element.Attribute("Class") is null
             && ReferenceEquals(resolvedMemberType, memberType)) {
@@ -684,7 +689,19 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
         });
     }
 
+    private static bool HasElementChildren(XElement element) => element.Elements().Any();
+
+    private bool CanValidateAsLeafText(XElement element, CatalogType type) {
+        return !HasElementChildren(element)
+               && !string.IsNullOrWhiteSpace(element.Value)
+               && catalog.SupportsLeafText(type);
+    }
+
     private bool IsScalarValueAssignable(CatalogType type, string value) {
+        if (catalog.IsAssignableTo(type, "RimWorld.QuestGen.ISlateRef")) {
+            return true;
+        }
+
         return type.FullName switch {
             "System.String" => true,
             "System.Boolean" => bool.TryParse(value, out _),
@@ -702,10 +719,111 @@ internal sealed partial class SemanticValidator(AssemblyCatalog catalog, Diagnos
             "System.Double" => double.TryParse(value, NumberStyles.Float | NumberStyles.AllowThousands,
                 CultureInfo.InvariantCulture, out _),
             "System.Decimal" => decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out _),
-            "System.Type" => catalog.FindType(value) is not null,
+            "System.Type" => value is "null" or "Null" || catalog.FindType(value) is not null,
+            "System.Action" => LooksLikeActionReference(value),
+            "UnityEngine.Vector2" => TryParseFloatComponents(value, 1, 2),
+            "UnityEngine.Vector3" => TryParseFloatComponents(value, 3, 3),
+            "UnityEngine.Vector4" => TryParseFloatComponents(value, 1, 4),
+            "UnityEngine.Quaternion" => TryParseFloatComponents(value, 1, 4),
+            "UnityEngine.Rect" => TryParseFloatComponents(value, 4, 4),
+            "UnityEngine.Color" => TryParseFloatComponents(TrimColorValue(value), 3, 4),
+            "Verse.ColorInt" => TryParseIntComponents(TrimColorValue(value), 3, 4),
+            "Verse.IntVec2" => TryParseIntComponents(value, 2, 2),
+            "Verse.IntVec3" => TryParseIntComponents(value, 3, 3),
+            "Verse.Rot4" => int.TryParse(value, out _) || value is "North" or "East" or "South" or "West",
+            "Verse.CellRect" => TryParseIntComponents(value, 4, 4),
+            "Verse.CurvePoint" => TryParseFloatComponents(value, 2, 2),
+            "Verse.NameTriple" => !string.IsNullOrWhiteSpace(value),
+            "Verse.FloatRange" => TryParseFloatRange(value),
+            "Verse.IntRange" => TryParseIntRange(value),
+            "RimWorld.QualityRange" => TryParseQualityRange(value),
+            "Verse.TaggedString" => true,
+            "RimWorld.Planet.PlanetTile" => TryParsePlanetTile(value),
+            "Steamworks.PublishedFileId_t" => ulong.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out _),
             _ when type.IsPrimitive => value.Length > 0,
             _ => false
         };
+    }
+
+    private static bool LooksLikeActionReference(string value) {
+        var parts = value.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return parts.Length is 2 or 3;
+    }
+
+    private static string TrimColorValue(string value) => value.TrimStart('(', 'R', 'G', 'B', 'A').TrimEnd(')');
+
+    private static bool TryParseFloatComponents(string value, int minCount, int maxCount) {
+        var parts = SplitComponents(value);
+        if (parts.Length < minCount || parts.Length > maxCount) {
+            return false;
+        }
+
+        return parts.All(static part => float.TryParse(part, NumberStyles.Float | NumberStyles.AllowThousands,
+            CultureInfo.InvariantCulture, out _));
+    }
+
+    private static bool TryParseIntComponents(string value, int minCount, int maxCount) {
+        var parts = SplitComponents(value);
+        if (parts.Length < minCount || parts.Length > maxCount) {
+            return false;
+        }
+
+        return parts.All(static part => int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out _));
+    }
+
+    private static string[] SplitComponents(string value) {
+        return value.TrimStart('(')
+            .TrimEnd(')')
+            .Split(',', StringSplitOptions.TrimEntries);
+    }
+
+    private static bool TryParseFloatRange(string value) {
+        var parts = value.Split('~', StringSplitOptions.TrimEntries);
+        if (parts.Length is < 1 or > 2 || parts.Any(string.IsNullOrWhiteSpace)) {
+            return false;
+        }
+
+        return parts.All(static part => float.TryParse(part, NumberStyles.Float | NumberStyles.AllowThousands,
+            CultureInfo.InvariantCulture, out _));
+    }
+
+    private static bool TryParseIntRange(string value) {
+        var parts = value.Split('~', StringSplitOptions.TrimEntries);
+        if (parts.Length is < 1 or > 2) {
+            return false;
+        }
+
+        if (parts.Length == 1) {
+            return int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out _);
+        }
+
+        return (string.IsNullOrEmpty(parts[0])
+                || int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+               && (string.IsNullOrEmpty(parts[1])
+                   || int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out _));
+    }
+
+    private bool TryParseQualityRange(string value) {
+        var parts = value.Split('~', StringSplitOptions.TrimEntries);
+        if (parts.Length != 2) {
+            return false;
+        }
+
+        var qualityCategory = catalog.FindType("RimWorld.QualityCategory") ?? catalog.FindType("QualityCategory");
+        if (qualityCategory is null || !qualityCategory.IsEnum) {
+            return false;
+        }
+
+        return parts.All(part => qualityCategory.EnumNames.Any(name => string.Equals(name, part, StringComparison.Ordinal)));
+    }
+
+    private static bool TryParsePlanetTile(string value) {
+        var parts = value.Split(',', StringSplitOptions.TrimEntries);
+        if (parts.Length is < 1 or > 2) {
+            return false;
+        }
+
+        return parts.All(static part => int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out _));
     }
 
     private CatalogType? ResolveClassOverride(XElement element, CatalogType declaredType, string defType, string? defName) {
